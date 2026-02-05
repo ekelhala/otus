@@ -129,8 +129,9 @@ program
 
       await daemon.init();
       console.log("\n✓ Otus initialized successfully!");
-      console.log("\nNext step:");
-      console.log('  otus do "your task description"');
+      console.log("\nNext steps:");
+      console.log('  otus chat         # Start an interactive session');
+      console.log('  otus do "task"    # Execute a single task');
     } catch (error) {
       console.error("\n✗ Initialization failed:", error);
       process.exit(1);
@@ -138,14 +139,142 @@ program
   });
 
 /**
+ * otus chat
+ * Interactive chat session with the agent
+ */
+program
+  .command("chat")
+  .description("Start an interactive chat session with Otus")
+  .option("-d, --dir <path>", "Workspace directory", process.cwd())
+  .option("--skip-checks", "Skip prerequisite checks (not recommended)")
+  .action(async (options) => {
+    const workspacePath = resolve(options.dir);
+
+    if (!isInitialized(workspacePath)) {
+      console.error("Error: Workspace not initialized");
+      console.error('Run "otus init" first');
+      process.exit(1);
+    }
+
+    const apiKeys = getApiKeys(workspacePath);
+
+    const daemon = new OtusDaemon({
+      workspacePath,
+      ...apiKeys,
+    });
+
+    // Handle graceful shutdown
+    let shuttingDown = false;
+    const shutdown = async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      
+      console.log("\n\nReceived interrupt signal, shutting down...");
+      await daemon.shutdown();
+      process.exit(0);
+    };
+
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
+    try {
+      // Check prerequisites (unless skipped)
+      if (!options.skipChecks) {
+        console.log("[Checking prerequisites...]");
+        const check = await daemon.checkPrerequisites();
+        
+        if (!check.ok) {
+          console.error("\n✗ Missing prerequisites:");
+          for (const issue of check.issues) {
+            console.error(`  • ${issue}`);
+          }
+          console.error("\nPlease resolve these issues before running.");
+          process.exit(1);
+        }
+        console.log("✓ Prerequisites OK\n");
+      }
+
+      // Initialize
+      await daemon.init();
+
+      // Start chat session
+      const session = daemon.startChat();
+      console.log("\n" + "=".repeat(60));
+      console.log("Otus Interactive Session");
+      console.log("Type your requests. Press Ctrl+C to exit.");
+      console.log("=".repeat(60) + "\n");
+
+      // Interactive loop using prompts
+      const readline = await import("readline");
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      const askQuestion = (prompt: string): Promise<string> => {
+        return new Promise((resolve) => {
+          rl.question(prompt, (answer) => {
+            resolve(answer);
+          });
+        });
+      };
+
+      while (true) {
+        try {
+          const userInput = await askQuestion("\n> ");
+          
+          if (!userInput.trim()) {
+            continue;
+          }
+
+          // Special commands
+          if (userInput.toLowerCase() === "/quit" || userInput.toLowerCase() === "/exit") {
+            console.log("\nGoodbye!");
+            break;
+          }
+
+          if (userInput.toLowerCase() === "/help") {
+            console.log("\nCommands:");
+            console.log("  /quit, /exit  - Exit the session");
+            console.log("  /help         - Show this help");
+            console.log("\nJust type your request and press Enter to chat with Otus.");
+            continue;
+          }
+
+          // Process with agent
+          console.log("");
+          const result = await session.chat(userInput);
+          
+          if (result.summary) {
+            console.log(`\n[Done] ${result.summary}`);
+          }
+        } catch (error) {
+          if ((error as any).code === "ERR_USE_AFTER_CLOSE") {
+            break;
+          }
+          console.error("\nError:", error instanceof Error ? error.message : error);
+        }
+      }
+
+      rl.close();
+      await daemon.shutdown();
+      process.exit(0);
+    } catch (error) {
+      console.error("\n✗ Fatal error:", error);
+      await daemon.shutdown();
+      process.exit(1);
+    }
+  });
+
+/**
  * otus do "<task>"
+ * Single task execution (non-interactive)
  */
 program
   .command("do")
-  .description("Execute a task autonomously")
+  .description("Execute a single task autonomously (non-interactive)")
   .argument("<goal>", "Task description or goal")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
-  .option("--otusignore-file <path>", "Path to .otusignore file (defaults to .otusignore in workspace root)")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (goal, options) => {
     const workspacePath = resolve(options.dir);
