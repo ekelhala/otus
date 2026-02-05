@@ -3,13 +3,13 @@
  * Manages multiple Firecracker VM sandboxes that can be created/destroyed via tool calls
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { existsSync, writeFileSync, readFileSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { GuestAgentClient } from "./vsock.ts";
-import { FIRECRACKER, VSOCK } from "@shared/constants.ts";
+import { FIRECRACKER, VSOCK } from "../shared/constants.ts";
 
 /**
  * Sandbox instance representing a single VM
