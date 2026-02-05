@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,29 @@ const (
 	// VSockPort is the port number for VSock communication
 	VSockPort = 9999
 )
+
+// NewlineObjectCodec implements a newline-delimited JSON codec for jsonrpc2
+type NewlineObjectCodec struct{}
+
+// WriteObject writes a JSON object followed by a newline
+func (NewlineObjectCodec) WriteObject(stream io.Writer, obj interface{}) error {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	_, err = stream.Write(data)
+	return err
+}
+
+// ReadObject reads a newline-delimited JSON object
+func (NewlineObjectCodec) ReadObject(stream *bufio.Reader, v interface{}) error {
+	line, err := stream.ReadBytes('\n')
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(line, v)
+}
 
 // fdConn wraps a file descriptor to implement io.Reader/Writer
 // This approach is used by the reference implementation for reliable vsock communication
@@ -135,7 +159,7 @@ func (s *Server) handleVSockConnection(fd int) {
 	defer fmt.Println("[Otus Agent] VSock client disconnected")
 
 	// Create jsonrpc2 connection with newline-delimited JSON codec
-	stream := jsonrpc2.NewBufferedStream(conn, jsonrpc2.VSCodeObjectCodec{})
+	stream := jsonrpc2.NewBufferedStream(conn, NewlineObjectCodec{})
 	rpcConn := jsonrpc2.NewConn(context.Background(), stream, jsonrpc2.HandlerWithError(ctx.handle))
 
 	// Wait for connection to close
