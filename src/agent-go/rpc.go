@@ -2,8 +2,8 @@ package main
 
 import "encoding/json"
 
-// handleRPCRequest processes an RPC request and returns a response
-func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
+// handleRPCRequest processes an RPC request and returns a response (ConnectionContext version)
+func (ctx *ConnectionContext) handleRPCRequest(req *RPCRequest) *RPCResponse {
 	resp := &RPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -11,7 +11,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 
 	switch req.Method {
 	case "health":
-		resp.Result = s.handleHealth()
+		resp.Result = ctx.server.handleHealth()
 
 	case "execute":
 		params, err := parseParams[ExecuteParams](req.Params)
@@ -19,7 +19,8 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleExecute(params)
+		// Use persistent shell for execute
+		result, err := ctx.handleExecute(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp
@@ -32,7 +33,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleReadFile(params)
+		result, err := ctx.server.handleReadFile(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp
@@ -45,7 +46,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleWriteFile(params)
+		result, err := ctx.server.handleWriteFile(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp
@@ -58,7 +59,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleListDir(params)
+		result, err := ctx.server.handleListDir(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp
@@ -71,7 +72,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleSyncToGuest(params)
+		result, err := ctx.server.handleSyncToGuest(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp
@@ -84,7 +85,7 @@ func (s *Server) handleRPCRequest(req *RPCRequest) *RPCResponse {
 			resp.Error = &RPCError{Code: InvalidParams, Message: "Invalid params"}
 			return resp
 		}
-		result, err := s.handleSyncFromGuest(params)
+		result, err := ctx.server.handleSyncFromGuest(params)
 		if err != nil {
 			resp.Error = &RPCError{Code: ExecutionError, Message: err.Error()}
 			return resp

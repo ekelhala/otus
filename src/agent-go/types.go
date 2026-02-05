@@ -105,45 +105,27 @@ type ListDirResult struct {
 	Entries []DirEntry `json:"entries"`
 }
 
-// SyncToGuestParams contains parameters for syncing files to the guest
+// SyncToGuestParams contains parameters for syncing files to the guest (tar-based)
 type SyncToGuestParams struct {
-	Files    []FileToSync `json:"files"`
-	BasePath string       `json:"basePath,omitempty"`
-}
-
-// FileToSync represents a file to be synced to the guest
-type FileToSync struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mode    int    `json:"mode,omitempty"`
+	TarData  string `json:"tarData"` // Base64-encoded tar.gz
+	BasePath string `json:"basePath,omitempty"`
 }
 
 // SyncToGuestResult contains the result of syncing files to the guest
 type SyncToGuestResult struct {
-	FilesWritten int         `json:"filesWritten"`
-	Errors       []SyncError `json:"errors"`
+	Success      bool   `json:"success"`
+	FilesWritten int    `json:"filesWritten"`
+	Error        string `json:"error,omitempty"`
 }
 
-// SyncError represents an error during file sync
-type SyncError struct {
-	Path  string `json:"path"`
-	Error string `json:"error"`
-}
-
-// SyncFromGuestParams contains parameters for syncing files from the guest
+// SyncFromGuestParams contains parameters for syncing files from the guest (tar-based)
 type SyncFromGuestParams struct {
-	BasePath string `json:"basePath,omitempty"`
-	Since    int64  `json:"since,omitempty"`
+	BasePath string   `json:"basePath,omitempty"`
+	Excludes []string `json:"excludes,omitempty"` // Additional patterns to exclude
 }
 
 // SyncFromGuestResult contains the result of syncing files from the guest
 type SyncFromGuestResult struct {
-	Files []SyncedFile `json:"files"`
-}
-
-// SyncedFile represents a file synced from the guest
-type SyncedFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mtime   int64  `json:"mtime"`
+	TarData string `json:"tarData"` // Base64-encoded tar.gz
+	Size    int    `json:"size"`    // Size in bytes
 }

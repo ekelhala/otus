@@ -118,6 +118,32 @@ func (s *Server) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
 	}, nil
 }
 
+// handleExecute executes a command in the persistent shell (ConnectionContext version)
+func (ctx *ConnectionContext) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
+	// Decode command from base64 (all commands are base64-encoded)
+	if params.Command == "" {
+		return nil, fmt.Errorf("no command provided")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(params.Command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 command: %w", err)
+	}
+	command := string(decoded)
+
+	// If cwd is specified, prepend cd command
+	if params.Cwd != "" && params.Cwd != DefaultCwd {
+		command = fmt.Sprintf("cd %q && %s", params.Cwd, command)
+	}
+
+	timeout := params.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
+	return ctx.shell.Execute(command, timeout, params.Env)
+}
+
 // handleReadFile reads a file and returns its content (base64 encoded)
 func (s *Server) handleReadFile(params *ReadFileParams) (*ReadFileResult, error) {
 	content, err := os.ReadFile(params.Path)
@@ -226,114 +252,140 @@ func (s *Server) handleListDir(params *ListDirParams) (*ListDirResult, error) {
 	return &ListDirResult{Entries: entries}, nil
 }
 
-// handleSyncToGuest syncs multiple files to the guest filesystem
+// Default exclude patterns for sync operations
+var defaultExcludes = []string{
+	"node_modules",
+	".venv",
+	"venv",
+	".env",
+	"__pycache__",
+	".git",
+	".svn",
+	".hg",
+	"*.pyc",
+	"*.pyo",
+	".pytest_cache",
+	".mypy_cache",
+	".tox",
+	".nox",
+	"dist",
+	"build",
+	"*.egg-info",
+	".eggs",
+	"*.so",
+	"*.dylib",
+	".DS_Store",
+	"Thumbs.db",
+	".idea",
+	".vscode",
+	"*.log",
+	".coverage",
+	"htmlcov",
+	".cache",
+	".parcel-cache",
+	".next",
+	".nuxt",
+	"target",  // Rust
+	"vendor",  // Go (when not needed)
+	"Pods",    // iOS
+	"*.class", // Java
+	".gradle",
+	".terraform",
+	"*.tfstate*",
+}
+
+// handleSyncToGuest extracts a tar.gz archive to the guest filesystem
 func (s *Server) handleSyncToGuest(params *SyncToGuestParams) (*SyncToGuestResult, error) {
 	basePath := params.BasePath
 	if basePath == "" {
 		basePath = DefaultCwd
 	}
 
-	result := &SyncToGuestResult{
-		Errors: []SyncError{},
+	// Ensure base path exists
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return &SyncToGuestResult{Success: false, Error: err.Error()}, nil
 	}
 
-	for _, file := range params.Files {
-		fullPath := filepath.Join(basePath, file.Path)
-
-		content, err := base64.StdEncoding.DecodeString(file.Content)
-		if err != nil {
-			result.Errors = append(result.Errors, SyncError{
-				Path:  file.Path,
-				Error: fmt.Sprintf("invalid base64: %v", err),
-			})
-			continue
-		}
-
-		dir := filepath.Dir(fullPath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			result.Errors = append(result.Errors, SyncError{
-				Path:  file.Path,
-				Error: err.Error(),
-			})
-			continue
-		}
-
-		mode := file.Mode
-		if mode == 0 {
-			mode = 0644
-		}
-
-		if err := os.WriteFile(fullPath, content, fs.FileMode(mode)); err != nil {
-			result.Errors = append(result.Errors, SyncError{
-				Path:  file.Path,
-				Error: err.Error(),
-			})
-			continue
-		}
-
-		result.FilesWritten++
+	// Decode base64 tar data
+	tarData, err := base64.StdEncoding.DecodeString(params.TarData)
+	if err != nil {
+		return &SyncToGuestResult{Success: false, Error: fmt.Sprintf("invalid base64: %v", err)}, nil
 	}
 
-	return result, nil
+	// Write to temp file and extract with tar command (more reliable than Go's tar)
+	tmpFile := fmt.Sprintf("/tmp/sync_%d.tar.gz", time.Now().UnixNano())
+	if err := os.WriteFile(tmpFile, tarData, 0644); err != nil {
+		return &SyncToGuestResult{Success: false, Error: err.Error()}, nil
+	}
+	defer os.Remove(tmpFile)
+
+	// Extract using tar command
+	cmd := exec.Command("tar", "-xzf", tmpFile, "-C", basePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return &SyncToGuestResult{
+			Success: false,
+			Error:   fmt.Sprintf("tar extract failed: %v: %s", err, string(output)),
+		}, nil
+	}
+
+	// Count files (approximate)
+	countCmd := exec.Command("sh", "-c", fmt.Sprintf("find %s -type f | wc -l", basePath))
+	countOutput, _ := countCmd.Output()
+	count := 0
+	fmt.Sscanf(strings.TrimSpace(string(countOutput)), "%d", &count)
+
+	return &SyncToGuestResult{
+		Success:      true,
+		FilesWritten: count,
+	}, nil
 }
 
-// handleSyncFromGuest syncs files from the guest filesystem
+// handleSyncFromGuest creates a tar.gz archive of the guest filesystem
 func (s *Server) handleSyncFromGuest(params *SyncFromGuestParams) (*SyncFromGuestResult, error) {
 	basePath := params.BasePath
 	if basePath == "" {
 		basePath = DefaultCwd
 	}
 
-	result := &SyncFromGuestResult{
-		Files: []SyncedFile{},
+	// Check if path exists
+	if _, err := os.Stat(basePath); os.IsNotExist(err) {
+		return &SyncFromGuestResult{TarData: "", Size: 0}, nil
 	}
 
-	err := filepath.Walk(basePath, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
+	// Build exclude arguments
+	excludes := append(defaultExcludes, params.Excludes...)
+	excludeArgs := make([]string, 0, len(excludes)*2)
+	for _, pattern := range excludes {
+		excludeArgs = append(excludeArgs, "--exclude="+pattern)
+	}
 
-		name := info.Name()
-		if info.IsDir() {
-			if shouldSkip(name, true) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	// Create tar.gz using tar command
+	tmpFile := fmt.Sprintf("/tmp/sync_%d.tar.gz", time.Now().UnixNano())
+	defer os.Remove(tmpFile)
 
-		if shouldSkip(name, false) {
-			return nil
-		}
+	args := append([]string{"-czf", tmpFile}, excludeArgs...)
+	args = append(args, "-C", basePath, ".")
 
-		mtime := info.ModTime().UnixMilli()
-		if params.Since > 0 && mtime < params.Since {
-			return nil
-		}
-
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(basePath, path)
-		if err != nil {
-			relPath = path
-		}
-
-		result.Files = append(result.Files, SyncedFile{
-			Path:    relPath,
-			Content: base64.StdEncoding.EncodeToString(content),
-			Mtime:   mtime,
-		})
-
-		return nil
-	})
-
+	cmd := exec.Command("tar", args...)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		// tar might return non-zero for warnings, check if file was created
+		if _, statErr := os.Stat(tmpFile); statErr != nil {
+			return nil, fmt.Errorf("tar create failed: %v: %s", err, string(output))
+		}
 	}
 
-	return result, nil
+	// Read the tar file
+	tarData, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tar file: %v", err)
+	}
+
+	return &SyncFromGuestResult{
+		TarData: base64.StdEncoding.EncodeToString(tarData),
+		Size:    len(tarData),
+	}, nil
 }
 
 // shouldSkip determines if a file or directory should be skipped
@@ -341,8 +393,12 @@ func shouldSkip(name string, isDir bool) bool {
 	if strings.HasPrefix(name, ".") {
 		return true
 	}
-	if isDir && (name == "node_modules" || name == "__pycache__") {
-		return true
+	if isDir {
+		for _, exclude := range defaultExcludes {
+			if name == exclude {
+				return true
+			}
+		}
 	}
 	return false
 }

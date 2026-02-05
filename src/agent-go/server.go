@@ -50,6 +50,12 @@ type Server struct {
 	startTime time.Time
 }
 
+// ConnectionContext holds per-connection state including persistent shell
+type ConnectionContext struct {
+	shell  *PersistentShell
+	server *Server
+}
+
 // NewServer creates a new Server instance
 func NewServer() *Server {
 	return &Server{
@@ -121,6 +127,21 @@ func (s *Server) startVSockListener() {
 func (s *Server) handleVSockConnection(fd int) {
 	conn := &fdConn{fd: fd}
 	defer conn.Close()
+
+	// Create persistent shell for this connection
+	shell, err := NewPersistentShell(DefaultCwd)
+	if err != nil {
+		fmt.Printf("[Otus Agent] Failed to create persistent shell: %v\n", err)
+		return
+	}
+	defer shell.Close()
+
+	ctx := &ConnectionContext{
+		shell:  shell,
+		server: s,
+	}
+
+	fmt.Println("[Otus Agent] VSock client connected (persistent shell ready)")
 	defer fmt.Println("[Otus Agent] VSock client disconnected")
 
 	reader := bufio.NewReader(conn)
@@ -145,7 +166,7 @@ func (s *Server) handleVSockConnection(fd int) {
 			continue
 		}
 
-		response := s.handleRPCRequest(&req)
+		response := ctx.handleRPCRequest(&req)
 		respBytes, _ := json.Marshal(response)
 		conn.Write(append(respBytes, '\n'))
 	}
@@ -191,6 +212,21 @@ func (s *Server) startTCPListener() {
 // handleConnection manages a client connection, reading and processing RPC requests
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
+	// Create persistent shell for this connection
+	shell, err := NewPersistentShell(DefaultCwd)
+	if err != nil {
+		fmt.Printf("[Otus Agent] Failed to create persistent shell: %v\n", err)
+		return
+	}
+	defer shell.Close()
+
+	ctx := &ConnectionContext{
+		shell:  shell,
+		server: s,
+	}
+
+	fmt.Println("[Otus Agent] TCP client connected (persistent shell ready)")
 	defer fmt.Println("[Otus Agent] Client disconnected")
 
 	reader := bufio.NewReader(conn)
@@ -215,7 +251,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		response := s.handleRPCRequest(&req)
+		response := ctx.handleRPCRequest(&req)
 		respBytes, _ := json.Marshal(response)
 		conn.Write(append(respBytes, '\n'))
 	}
