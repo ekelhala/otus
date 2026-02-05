@@ -6,7 +6,7 @@
 import { connect, type Socket } from "net";
 import type { RPCRequest, RPCResponse } from "@shared/rpc.ts";
 import { createRequest, createErrorResponse, RPCErrorCode } from "@shared/rpc.ts";
-import { VSOCK } from "@shared/constants.ts";
+import { VSOCK, FIRECRACKER } from "@shared/constants.ts";
 
 export interface VSockConnectionOptions {
   /** Path to Firecracker's VSock Unix socket */
@@ -33,7 +33,7 @@ export class VSockConnection {
 
   constructor(options: VSockConnectionOptions) {
     this.options = {
-      timeout: 10000, // 10 second timeout for faster retry cycles
+      timeout: 60000, // 60 second default timeout for operations
       ...options,
     };
   }
@@ -43,6 +43,8 @@ export class VSockConnection {
    */
   async connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      console.log(`[VSock] Connecting to socket: ${this.options.socketPath} (port ${this.options.port})`);
+      
       const timeout = setTimeout(() => {
         if (this.socket) {
           this.socket.destroy();
@@ -60,11 +62,14 @@ export class VSockConnection {
         if (connectPhase) {
           // Handle CONNECT protocol response
           buffer += data.toString();
+          console.log(`[VSock] Received during connect phase: ${JSON.stringify(buffer)}`);
           
           if (buffer.includes("\n")) {
             const line = buffer.split("\n")[0] ?? "";
+            console.log(`[VSock] Parsed response line: ${JSON.stringify(line)}`);
             if (line.startsWith("OK")) {
               // Connection established
+              console.log("[VSock] Connection established successfully");
               connectPhase = false;
               clearTimeout(timeout);
               this.socket!.off("data", dataHandler);
@@ -81,12 +86,14 @@ export class VSockConnection {
       this.socket.on("connect", () => {
         // Send CONNECT command to VSock proxy
         const connectCmd = `CONNECT ${this.options.port}\n`;
+        console.log(`[VSock] Connected to unix socket, sending: ${connectCmd.trim()}`);
         this.socket!.write(connectCmd);
       });
 
       this.socket.on("data", dataHandler);
 
       this.socket.on("error", (error) => {
+        console.log(`[VSock] Socket error: ${error.message}`);
         clearTimeout(timeout);
         reject(error);
       });
@@ -155,14 +162,18 @@ export class VSockConnection {
 
   /**
    * Send an RPC request and wait for response
+   * @param method - RPC method name
+   * @param params - Method parameters
+   * @param requestTimeout - Optional timeout in ms (defaults to connection timeout)
    */
-  async request(method: string, params?: Record<string, unknown>): Promise<RPCResponse> {
+  async request(method: string, params?: Record<string, unknown>, requestTimeout?: number): Promise<RPCResponse> {
     if (!this.socket || this.socket.destroyed) {
       throw new Error("Not connected to guest agent");
     }
 
     const id = this.requestId++;
     const request = createRequest(method, params, id);
+    const timeoutMs = requestTimeout ?? this.options.timeout;
 
     return new Promise((resolve, reject) => {
       // Set up response handler
@@ -171,8 +182,8 @@ export class VSockConnection {
       // Set timeout for this specific request
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new Error(`Request ${method} timed out`));
-      }, this.options.timeout);
+        reject(new Error(`Request ${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
 
       // Clear timeout when request completes
       const originalResolve = resolve;
@@ -223,7 +234,7 @@ export class GuestAgentClient {
   private connection: VSockConnection;
 
   constructor(
-    socketPath = "./v.sock",
+    socketPath = FIRECRACKER.VSOCK_SOCKET,
     guestCid = VSOCK.GUEST_CID,
     port = VSOCK.AGENT_PORT
   ) {
@@ -258,10 +269,14 @@ export class GuestAgentClient {
     durationMs: number;
     timedOut?: boolean;
   }> {
+    // Encode command as base64 to avoid multiline/escaping issues
+    // Use execution timeout + buffer for RPC overhead (timeout is in seconds, convert to ms)
+    const execTimeoutMs = ((options?.timeout || 300) + 10) * 1000;
+    
     const response = await this.connection.request("execute", {
-      command,
+      command: Buffer.from(command).toString("base64"),
       ...options,
-    });
+    }, execTimeoutMs);
 
     if (response.error) {
       throw new Error(`Execution failed: ${response.error.message}`);
@@ -297,10 +312,11 @@ export class GuestAgentClient {
     filesWritten: number;
     errors: Array<{ path: string; error: string }>;
   }> {
+    // Use longer timeout for sync operations as they may need to write many files
     const response = await this.connection.request("sync_to_guest", {
       files,
       basePath,
-    });
+    }, 120000); // 2 minute timeout for sync operations
 
     if (response.error) {
       throw new Error(`Sync to guest failed: ${response.error.message}`);
@@ -318,10 +334,11 @@ export class GuestAgentClient {
   ): Promise<{
     files: Array<{ path: string; content: string; mtime: number }>;
   }> {
+    // Use longer timeout for sync operations as they may need to read many files
     const response = await this.connection.request("sync_from_guest", {
       basePath,
       since,
-    });
+    }, 120000); // 2 minute timeout for sync operations
 
     if (response.error) {
       throw new Error(`Sync from guest failed: ${response.error.message}`);
@@ -345,10 +362,12 @@ export class GuestAgentClient {
       mtime: number;
     }>;
   }> {
+    // Use longer timeout for recursive directory listing
+    const timeoutMs = recursive ? 120000 : 60000;
     const response = await this.connection.request("list_dir", {
       path,
       recursive,
-    });
+    }, timeoutMs);
 
     if (response.error) {
       throw new Error(`List dir failed: ${response.error.message}`);
@@ -360,268 +379,6 @@ export class GuestAgentClient {
   /**
    * Close the connection
    */
-  async close(): Promise<void> {
-    await this.connection.close();
-  }
-}
-
-/**
- * Direct TCP connection to guest agent (via network, not VSock)
- * Used as a fallback when VSock doesn't work
- */
-export class TcpConnection {
-  private socket: Socket | null = null;
-  private readonly host: string;
-  private readonly port: number;
-  private readonly timeout: number;
-  private requestId = 0;
-  private readonly pendingRequests = new Map<
-    number | string,
-    {
-      resolve: (response: RPCResponse) => void;
-      reject: (error: Error) => void;
-    }
-  >();
-
-  constructor(host: string, port: number, timeout = 10000) {
-    this.host = host;
-    this.port = port;
-    this.timeout = timeout;
-  }
-
-  async connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.socket) {
-          this.socket.destroy();
-        }
-        reject(new Error("TCP connection timeout"));
-      }, this.timeout);
-
-      this.socket = connect({ host: this.host, port: this.port });
-
-      this.socket.on("connect", () => {
-        clearTimeout(timeout);
-        this.setupSocketHandlers();
-        resolve();
-      });
-
-      this.socket.on("error", (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-    });
-  }
-
-  private setupSocketHandlers(): void {
-    if (!this.socket) return;
-
-    let buffer = "";
-
-    this.socket.on("data", (data) => {
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const response = JSON.parse(line) as RPCResponse;
-            this.handleResponse(response);
-          } catch (error) {
-            console.error("[TcpConnection] Failed to parse response:", line, error);
-          }
-        }
-      }
-    });
-
-    this.socket.on("error", (error) => {
-      console.error("[TcpConnection] Socket error:", error);
-      this.rejectAllPending(error);
-    });
-
-    this.socket.on("close", () => {
-      this.rejectAllPending(new Error("Connection closed"));
-    });
-  }
-
-  private handleResponse(response: RPCResponse): void {
-    const pending = this.pendingRequests.get(response.id);
-    if (pending) {
-      this.pendingRequests.delete(response.id);
-      pending.resolve(response);
-    }
-  }
-
-  private rejectAllPending(error: Error): void {
-    for (const pending of this.pendingRequests.values()) {
-      pending.reject(error);
-    }
-    this.pendingRequests.clear();
-  }
-
-  async request(method: string, params?: Record<string, unknown>): Promise<RPCResponse> {
-    if (!this.socket || this.socket.destroyed) {
-      throw new Error("Not connected to guest agent");
-    }
-
-    const id = this.requestId++;
-    const request = createRequest(method, params, id);
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        reject(new Error(`Request ${method} timed out`));
-      }, this.timeout);
-
-      this.pendingRequests.set(id, {
-        resolve: (response) => {
-          clearTimeout(timeout);
-          resolve(response);
-        },
-        reject: (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        },
-      });
-
-      const message = JSON.stringify(request) + "\n";
-      this.socket!.write(message);
-    });
-  }
-
-  async close(): Promise<void> {
-    if (this.socket && !this.socket.destroyed) {
-      return new Promise((resolve) => {
-        this.socket!.end(() => {
-          this.socket = null;
-          resolve();
-        });
-      });
-    }
-  }
-
-  isConnected(): boolean {
-    return this.socket !== null && !this.socket.destroyed;
-  }
-}
-
-/**
- * Network-based guest agent client
- * Connects directly via TCP over the TAP network interface
- */
-export class NetworkAgentClient {
-  private connection: TcpConnection;
-
-  constructor(guestIp: string, port = VSOCK.AGENT_PORT) {
-    this.connection = new TcpConnection(guestIp, port);
-  }
-
-  async connect(): Promise<void> {
-    await this.connection.connect();
-  }
-
-  async execute(
-    command: string,
-    options?: {
-      cwd?: string;
-      timeout?: number;
-      env?: Record<string, string>;
-    }
-  ): Promise<{
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-    durationMs: number;
-    timedOut?: boolean;
-  }> {
-    const response = await this.connection.request("execute", {
-      command,
-      ...options,
-    });
-
-    if (response.error) {
-      throw new Error(`Execution failed: ${response.error.message}`);
-    }
-
-    return response.result as any;
-  }
-
-  async health(): Promise<{
-    status: string;
-    uptime: number;
-    hostname: string;
-  }> {
-    const response = await this.connection.request("health");
-
-    if (response.error) {
-      throw new Error(`Health check failed: ${response.error.message}`);
-    }
-
-    return response.result as any;
-  }
-
-  async syncToGuest(
-    files: Array<{ path: string; content: string; mode?: number }>,
-    basePath = "/workspace"
-  ): Promise<{
-    filesWritten: number;
-    errors: Array<{ path: string; error: string }>;
-  }> {
-    const response = await this.connection.request("sync_to_guest", {
-      files,
-      basePath,
-    });
-
-    if (response.error) {
-      throw new Error(`Sync to guest failed: ${response.error.message}`);
-    }
-
-    return response.result as any;
-  }
-
-  async syncFromGuest(
-    basePath = "/workspace",
-    since?: number
-  ): Promise<{
-    files: Array<{ path: string; content: string; mtime: number }>;
-  }> {
-    const response = await this.connection.request("sync_from_guest", {
-      basePath,
-      since,
-    });
-
-    if (response.error) {
-      throw new Error(`Sync from guest failed: ${response.error.message}`);
-    }
-
-    return response.result as any;
-  }
-
-  async listDir(
-    path: string,
-    recursive = false
-  ): Promise<{
-    entries: Array<{
-      name: string;
-      path: string;
-      isDirectory: boolean;
-      size: number;
-      mtime: number;
-    }>;
-  }> {
-    const response = await this.connection.request("list_dir", {
-      path,
-      recursive,
-    });
-
-    if (response.error) {
-      throw new Error(`List dir failed: ${response.error.message}`);
-    }
-
-    return response.result as any;
-  }
-
   async close(): Promise<void> {
     await this.connection.close();
   }

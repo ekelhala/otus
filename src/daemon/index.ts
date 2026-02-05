@@ -8,7 +8,7 @@ import { existsSync } from "fs";
 import { join, relative } from "path";
 import { WORKSPACE, FIRECRACKER } from "@shared/constants.ts";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
-import { GuestAgentClient, NetworkAgentClient } from "./vsock.ts";
+import { GuestAgentClient } from "./vsock.ts";
 import { EpisodicMemory } from "./memory/episodic.ts";
 import { SemanticMemory } from "./memory/semantic.ts";
 import { VoyageClient } from "./embeddings.ts";
@@ -38,9 +38,8 @@ export class OtusDaemon {
   private semanticMemory: SemanticMemory | null = null;
   private voyageClient: VoyageClient | null = null;
   private vm: FirecrackerVM | null = null;
-  private agentClient: GuestAgentClient | NetworkAgentClient | null = null;
+  private agentClient: GuestAgentClient | null = null;
   private inferenceEngine: InferenceEngine | null = null;
-  private guestIp: string | null = null;
 
   constructor(config: DaemonConfig) {
     this.config = config;
@@ -298,58 +297,29 @@ export class OtusDaemon {
   }
 
   /**
-   * Connect to the guest agent
-   * Tries VSock first, falls back to network connection if VSock fails
+   * Connect to the guest agent via VSock
    */
   private async connectAgent(): Promise<void> {
-    // Try VSock first
-    console.log("[Otus] Attempting VSock connection...");
-    let vsockFailed = false;
-    
-    for (let attempts = 0; attempts < 5; attempts++) {
+    console.log("[Otus] Connecting via VSock...");
+
+    for (let attempts = 0; attempts < 10; attempts++) {
       try {
         this.agentClient = new GuestAgentClient();
         await this.agentClient.connect();
-        
+
         // Verify with health check
         await this.agentClient.health();
         console.log("[Otus] Connected via VSock");
         return;
       } catch (error) {
-        console.log(`[Otus] VSock attempt ${attempts + 1}/5 failed: ${error instanceof Error ? error.message : error}`);
+        console.log(
+          `[Otus] VSock attempt ${attempts + 1}/10: ${error instanceof Error ? error.message : error}`
+        );
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
-    
-    vsockFailed = true;
-    console.log("[Otus] VSock connection failed, trying network connection...");
-    
-    // Get guest IP from TAP device
-    const tapDevice = this.vm?.getTapDevice();
-    if (!tapDevice) {
-      throw new Error("No TAP device available for network fallback");
-    }
-    
-    this.guestIp = tapDevice.guestIp;
-    console.log(`[Otus] Guest IP: ${this.guestIp}`);
-    
-    // Try network connection
-    for (let attempts = 0; attempts < 15; attempts++) {
-      try {
-        this.agentClient = new NetworkAgentClient(this.guestIp);
-        await this.agentClient.connect();
-        
-        // Verify with health check
-        await this.agentClient.health();
-        console.log("[Otus] Connected via network");
-        return;
-      } catch (error) {
-        console.log(`[Otus] Network attempt ${attempts + 1}/15: ${error instanceof Error ? error.message : error}`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
-    }
-    
-    throw new Error("Failed to connect to agent via both VSock and network");
+
+    throw new Error("Failed to connect to agent via VSock after 10 attempts");
   }
 
   /**
@@ -489,6 +459,8 @@ export class OtusDaemon {
 
     console.log(`[Otus] Syncing ${result.files.length} files from VM...`);
     
+    let syncedCount = 0;
+
     for (const file of result.files) {
       const targetPath = join(this.config.workspacePath, file.path);
       
@@ -502,11 +474,11 @@ export class OtusDaemon {
         // Decode and write file
         const content = Buffer.from(file.content, 'base64');
         await writeFile(targetPath, content);
-        
-        console.log(`[Otus] Updated: ${file.path}`);
+        syncedCount++;
       } catch (error) {
         console.warn(`[Otus] Failed to write file ${file.path}:`, error);
       }
     }
+    console.log(`[Otus] ✓ Workspace sync from VM complete, synced ${syncedCount} files`);
   }
 }
