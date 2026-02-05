@@ -16,7 +16,7 @@
     "remove:network": "sudo ./infra/remove-tap-pool.sh",
     "test": "bun test",
     "test:unit": "bun test -t 'parseIgnoreFile|tar exclude'",
-    "test:integration": "bun test -t 'VM Sync'"
+    "test:integration": "bun test --timeout 60000 -t 'VM Sync'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",

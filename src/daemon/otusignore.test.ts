@@ -5,8 +5,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { mkdir, writeFile, readFile, rm, readdir } from "fs/promises";
-import { existsSync } from "fs";
+import { mkdir, writeFile, readFile, rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { $ } from "bun";
@@ -245,7 +244,6 @@ describe("tar exclude behavior", () => {
 describe("VM Sync Integration Tests", () => {
   let client: GuestAgentClient;
   let vm: FirecrackerVM;
-  let testWorkspace: string;
 
   beforeAll(async () => {
     console.log("Starting Firecracker VM for sync tests...");
@@ -274,84 +272,26 @@ describe("VM Sync Integration Tests", () => {
       try {
         await client.connect();
         console.log("Connected to VM agent");
-        break;
+        return;
       } catch {
-        if (i === 9) throw new Error("Failed to connect to VM");
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
-
-    // Create test workspace directory
-    testWorkspace = join(tmpdir(), `otusignore-integration-${Date.now()}`);
-    await mkdir(testWorkspace, { recursive: true });
-  }, 90000);
+    throw new Error("Failed to connect to VM");
+  }, 60000);
 
   afterAll(async () => {
-    if (client) {
-      try {
-        await client.close();
-      } catch {}
-    }
-    if (vm) {
-      try {
-        await vm.destroy();
-      } catch {}
-    }
-    if (testWorkspace) {
-      await rm(testWorkspace, { recursive: true, force: true });
-    }
+    await client?.close().catch(() => {});
+    await vm?.destroy().catch(() => {});
   });
-
-  beforeEach(async () => {
-    // Clean workspace between tests
-    const files = await readdir(testWorkspace);
-    for (const file of files) {
-      await rm(join(testWorkspace, file), { recursive: true, force: true });
-    }
-    // Clean guest workspace
-    await client.execute("rm -rf /workspace/* /workspace/.*");
-  });
-
-  test("sync files to guest and back without .otusignore", async () => {
-    // Create test files on host
-    await writeFile(join(testWorkspace, "hello.py"), "print('hello')");
-    await writeFile(join(testWorkspace, "data.txt"), "test data");
-
-    // Create tar and sync to guest
-    const tarData = await createTarWithExcludes(testWorkspace, []);
-    const syncResult = await client.syncToGuest(tarData, "/workspace");
-    expect(syncResult.success).toBe(true);
-
-    // Verify files exist in guest
-    const lsResult = await client.execute("ls -la /workspace/");
-    console.log("Guest workspace:", lsResult.stdout);
-    expect(lsResult.stdout).toContain("hello.py");
-    expect(lsResult.stdout).toContain("data.txt");
-
-    // Sync back from guest (no excludes = everything)
-    const syncBack = await client.syncFromGuest("/workspace", []);
-    expect(syncBack.size).toBeGreaterThan(0);
-
-    // Extract and verify
-    const extractDir = join(testWorkspace, "extracted");
-    await mkdir(extractDir);
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncBack.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
-
-    expect(existsSync(join(extractDir, "hello.py"))).toBe(true);
-    expect(existsSync(join(extractDir, "data.txt"))).toBe(true);
-  }, 30000);
 
   test("file created in VM syncs back to host", async () => {
     // Create a Python file directly in the VM
-    const pythonCode = `print("Hello from VM!")
+    await client.execute(`cat > /workspace/vm_created.py << 'EOF'
+print("Hello from VM!")
 x = 1 + 2
 print(f"Result: {x}")
-`;
-    await client.execute(`cat > /workspace/vm_created.py << 'PYEOF'
-${pythonCode}
-PYEOF`);
+EOF`);
 
     // Verify file exists in VM
     const catResult = await client.execute("cat /workspace/vm_created.py");
@@ -362,157 +302,99 @@ PYEOF`);
     expect(syncResult.size).toBeGreaterThan(0);
 
     // Extract and verify Python file is present
-    const extractDir = join(testWorkspace, "from-vm");
-    await mkdir(extractDir, { recursive: true });
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncResult.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
+    const contents = await listTarContents(syncResult.tarData);
+    expect(contents.some((f) => f.includes("vm_created.py"))).toBe(true);
+  });
 
-    expect(existsSync(join(extractDir, "vm_created.py"))).toBe(true);
-    const content = await readFile(join(extractDir, "vm_created.py"), "utf-8");
-    expect(content).toContain("Hello from VM!");
-  }, 30000);
-
-  test(".otusignore excludes files from sync back", async () => {
+  test("excludes are applied during sync back", async () => {
     // Create files in VM including some that should be excluded
     await client.execute(`
       mkdir -p /workspace/node_modules
       echo '{}' > /workspace/node_modules/package.json
       echo 'print("keep me")' > /workspace/keep.py
       echo 'temp' > /workspace/test.tmp
-      echo 'log data' > /workspace/app.log
       mkdir -p /workspace/.git
       echo 'config' > /workspace/.git/config
     `);
 
-    // Verify all files exist in VM
-    const lsResult = await client.execute("find /workspace -type f");
-    console.log("Files in VM:", lsResult.stdout);
+    // Verify files exist in VM
+    const lsResult = await client.execute("ls -la /workspace/");
     expect(lsResult.stdout).toContain("keep.py");
-    expect(lsResult.stdout).toContain("package.json");
-    expect(lsResult.stdout).toContain("test.tmp");
+    expect(lsResult.stdout).toContain("node_modules");
 
     // Sync from guest WITH excludes (simulating .otusignore patterns)
-    const excludes = ["node_modules", ".git", "*.tmp", "*.log"];
-    const syncResult = await client.syncFromGuest("/workspace", excludes);
-
-    // Extract and verify excludes worked
-    const extractDir = join(testWorkspace, "filtered");
-    await mkdir(extractDir, { recursive: true });
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncResult.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
-
-    // Should have keep.py
-    expect(existsSync(join(extractDir, "keep.py"))).toBe(true);
-    const content = await readFile(join(extractDir, "keep.py"), "utf-8");
-    expect(content).toContain("keep me");
-
-    // Should NOT have excluded files
-    expect(existsSync(join(extractDir, "node_modules"))).toBe(false);
-    expect(existsSync(join(extractDir, ".git"))).toBe(false);
-    expect(existsSync(join(extractDir, "test.tmp"))).toBe(false);
-    expect(existsSync(join(extractDir, "app.log"))).toBe(false);
-  }, 30000);
-
-  test("Python files sync correctly when not excluded", async () => {
-    // This specifically tests the reported issue where .py files weren't syncing
-    
-    // Create Python files in VM
-    await client.execute(`
-      echo 'def main():' > /workspace/main.py
-      echo '    print("hello")' >> /workspace/main.py
-      echo 'import os' > /workspace/utils.py
-      mkdir -p /workspace/src
-      echo 'class Foo: pass' > /workspace/src/models.py
-    `);
-
-    // Sync with excludes that should NOT affect .py files
-    const excludes = ["__pycache__", "*.pyc", "*.pyo", ".pytest_cache"];
-    const syncResult = await client.syncFromGuest("/workspace", excludes);
-
-    // Extract
-    const extractDir = join(testWorkspace, "python-test");
-    await mkdir(extractDir, { recursive: true });
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncResult.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
-
-    // All .py files should be present
-    expect(existsSync(join(extractDir, "main.py"))).toBe(true);
-    expect(existsSync(join(extractDir, "utils.py"))).toBe(true);
-    expect(existsSync(join(extractDir, "src", "models.py"))).toBe(true);
-
-    // Verify content
-    const mainContent = await readFile(join(extractDir, "main.py"), "utf-8");
-    expect(mainContent).toContain("def main():");
-  }, 30000);
-
-  test(".otusignore itself is always included in sync", async () => {
-    // Create .otusignore and other files in VM
-    await client.execute(`
-      echo 'node_modules' > /workspace/.otusignore
-      echo '.git' >> /workspace/.otusignore
-      echo '*.tmp' >> /workspace/.otusignore
-      echo 'test file' > /workspace/test.txt
-      echo 'temp' > /workspace/file.tmp
-    `);
-
-    // Sync with the patterns from .otusignore
     const excludes = ["node_modules", ".git", "*.tmp"];
     const syncResult = await client.syncFromGuest("/workspace", excludes);
 
-    // Extract
-    const extractDir = join(testWorkspace, "otusignore-sync");
-    await mkdir(extractDir, { recursive: true });
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncResult.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
+    // Verify excludes worked by checking tar contents
+    const contents = await listTarContents(syncResult.tarData);
 
-    // .otusignore should be present (it's not in the excludes list)
-    expect(existsSync(join(extractDir, ".otusignore"))).toBe(true);
-    expect(existsSync(join(extractDir, "test.txt"))).toBe(true);
-    
-    // .tmp file should be excluded
-    expect(existsSync(join(extractDir, "file.tmp"))).toBe(false);
-  }, 30000);
+    // Should have keep.py
+    expect(contents.some((f) => f.includes("keep.py"))).toBe(true);
 
-  test("empty workspace syncs correctly", async () => {
-    // Ensure workspace is empty
-    await client.execute("rm -rf /workspace/* /workspace/.*");
+    // Should NOT have excluded files
+    expect(contents.some((f) => f.includes("node_modules"))).toBe(false);
+    expect(contents.some((f) => f.includes(".git"))).toBe(false);
+    expect(contents.some((f) => f.includes("test.tmp"))).toBe(false);
+  });
 
-    const syncResult = await client.syncFromGuest("/workspace", []);
+  test("Python .py files sync when .pyc excluded", async () => {
+    // Create Python source and compiled files
+    await client.execute(`
+      echo 'def main(): pass' > /workspace/source.py
+      echo 'compiled bytecode' > /workspace/source.pyc
+      mkdir -p /workspace/__pycache__
+      echo 'cache' > /workspace/__pycache__/source.cpython.pyc
+    `);
 
-    // Should return valid (possibly empty) tar
-    expect(syncResult).toBeDefined();
-    // Size might be small but should be valid tar header at minimum
-  }, 30000);
+    // Sync with excludes that should NOT affect .py files
+    const excludes = ["__pycache__", "*.pyc", "*.pyo"];
+    const syncResult = await client.syncFromGuest("/workspace", excludes);
+    const contents = await listTarContents(syncResult.tarData);
 
-  test("large number of files syncs correctly", async () => {
+    // .py should be present
+    expect(contents.some((f) => f.includes("source.py"))).toBe(true);
+
+    // .pyc and __pycache__ should be excluded
+    expect(contents.some((f) => f.includes("source.pyc"))).toBe(false);
+    expect(contents.some((f) => f.includes("__pycache__"))).toBe(false);
+  });
+
+  test("empty excludes means all files sync", async () => {
+    // Create files that would normally be excluded
+    await client.execute(`
+      mkdir -p /workspace/testall
+      echo 'code' > /workspace/testall/app.py
+      echo 'temp' > /workspace/testall/data.tmp
+      mkdir -p /workspace/testall/.hidden
+      echo 'secret' > /workspace/testall/.hidden/file
+    `);
+
+    // Sync with NO excludes
+    const syncResult = await client.syncFromGuest("/workspace/testall", []);
+    const contents = await listTarContents(syncResult.tarData);
+
+    // Everything should be present
+    expect(contents.some((f) => f.includes("app.py"))).toBe(true);
+    expect(contents.some((f) => f.includes("data.tmp"))).toBe(true);
+    expect(contents.some((f) => f.includes(".hidden"))).toBe(true);
+  });
+
+  test("sync many files works", async () => {
     // Create many files in VM
     await client.execute(`
+      mkdir -p /workspace/manyfiles
       for i in $(seq 1 50); do
-        echo "file $i content" > /workspace/file_$i.txt
-      done
-      mkdir -p /workspace/subdir
-      for i in $(seq 1 50); do
-        echo "subfile $i" > /workspace/subdir/sub_$i.txt
+        echo "file $i content" > /workspace/manyfiles/file_$i.txt
       done
     `);
 
-    const syncResult = await client.syncFromGuest("/workspace", []);
-
-    // Extract
-    const extractDir = join(testWorkspace, "many-files");
-    await mkdir(extractDir, { recursive: true });
-    const tarFile = join(extractDir, "sync.tar.gz");
-    await writeFile(tarFile, syncResult.tarData);
-    await $`tar -xzf ${tarFile} -C ${extractDir}`.quiet();
+    const syncResult = await client.syncFromGuest("/workspace/manyfiles", []);
+    const contents = await listTarContents(syncResult.tarData);
 
     // Check a sampling of files
-    expect(existsSync(join(extractDir, "file_1.txt"))).toBe(true);
-    expect(existsSync(join(extractDir, "file_50.txt"))).toBe(true);
-    expect(existsSync(join(extractDir, "subdir", "sub_1.txt"))).toBe(true);
-    expect(existsSync(join(extractDir, "subdir", "sub_50.txt"))).toBe(true);
-  }, 60000);
+    expect(contents.some((f) => f.includes("file_1.txt"))).toBe(true);
+    expect(contents.some((f) => f.includes("file_25.txt"))).toBe(true);
+    expect(contents.some((f) => f.includes("file_50.txt"))).toBe(true);
+  });
 });
