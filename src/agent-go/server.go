@@ -1,23 +1,20 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/sourcegraph/jsonrpc2"
 	"golang.org/x/sys/unix"
 )
 
 const (
 	// VSockPort is the port number for VSock communication
 	VSockPort = 9999
-	// TCPPort is the port number for TCP communication
-	TCPPort = 9999
 )
 
 // fdConn wraps a file descriptor to implement io.Reader/Writer
@@ -63,7 +60,7 @@ func NewServer() *Server {
 	}
 }
 
-// Start initializes and starts both VSock and TCP listeners
+// Start initializes and starts the VSock listener
 func (s *Server) Start() {
 	hostname, _ := os.Hostname()
 	fmt.Printf("[Otus Agent] Starting Go agent\n")
@@ -72,11 +69,7 @@ func (s *Server) Start() {
 
 	os.MkdirAll(DefaultCwd, 0755)
 
-	go s.startVSockListener()
-	go s.startTCPListener()
-
-	// Block forever
-	select {}
+	s.startVSockListener()
 }
 
 // startVSockListener creates and manages the VSock listener
@@ -116,14 +109,11 @@ func (s *Server) startVSockListener() {
 		}
 
 		fmt.Println("[Otus Agent] VSock client connected")
-
-		// Use direct fd wrapper for reliable vsock communication
-		// This approach matches the reference implementation
 		go s.handleVSockConnection(nfd)
 	}
 }
 
-// handleVSockConnection handles a vsock connection using raw fd
+// handleVSockConnection handles a vsock connection using jsonrpc2
 func (s *Server) handleVSockConnection(fd int) {
 	conn := &fdConn{fd: fd}
 	defer conn.Close()
@@ -144,175 +134,88 @@ func (s *Server) handleVSockConnection(fd int) {
 	fmt.Println("[Otus Agent] VSock client connected (persistent shell ready)")
 	defer fmt.Println("[Otus Agent] VSock client disconnected")
 
-	reader := bufio.NewReader(conn)
+	// Create jsonrpc2 connection with newline-delimited JSON codec
+	stream := jsonrpc2.NewBufferedStream(conn, jsonrpc2.VSCodeObjectCodec{})
+	rpcConn := jsonrpc2.NewConn(context.Background(), stream, jsonrpc2.HandlerWithError(ctx.handle))
 
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				fmt.Printf("[Otus Agent] VSock read error: %v\n", err)
-			}
-			return
-		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var req RPCRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			s.sendErrorRaw(conn, nil, ParseError, "Parse error", nil)
-			continue
-		}
-
-		response := ctx.handleRPCRequest(&req)
-		respBytes, _ := json.Marshal(response)
-		data := append(respBytes, '\n')
-
-		// Write all bytes (important for large responses like sync_from_guest)
-		written := 0
-		for written < len(data) {
-			n, err := conn.Write(data[written:])
-			if err != nil {
-				fmt.Printf("[Otus Agent] VSock write error: %v\n", err)
-				return
-			}
-			written += n
-		}
-	}
+	// Wait for connection to close
+	<-rpcConn.DisconnectNotify()
 }
 
-// sendErrorRaw sends an error response using raw fd writer
-func (s *Server) sendErrorRaw(w io.Writer, id interface{}, code int, message string, data interface{}) {
-	resp := RPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &RPCError{
-			Code:    code,
-			Message: message,
-			Data:    data,
-		},
-	}
-	respBytes, _ := json.Marshal(resp)
-	respData := append(respBytes, '\n')
+// handle processes JSON-RPC requests
+func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {
+	switch req.Method {
+	case "health":
+		return ctx.server.handleHealth(), nil
 
-	// Ensure all bytes are written
-	written := 0
-	for written < len(respData) {
-		n, err := w.Write(respData[written:])
+	case "execute":
+		var params ExecuteParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := ctx.handleExecute(&params)
 		if err != nil {
-			fmt.Printf("[Otus Agent] Error write failed: %v\n", err)
-			return
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
-		written += n
-	}
-}
+		return result, nil
 
-// startTCPListener creates and manages the TCP listener
-func (s *Server) startTCPListener() {
-	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", TCPPort))
-	if err != nil {
-		fmt.Printf("[Otus Agent] Failed to start TCP listener: %v\n", err)
-		return
-	}
-
-	fmt.Printf("[Otus Agent] Listening on TCP port %d\n", TCPPort)
-
-	for {
-		conn, err := listener.Accept()
+	case "read_file":
+		var params ReadFileParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := ctx.server.handleReadFile(&params)
 		if err != nil {
-			fmt.Printf("[Otus Agent] TCP accept error: %v\n", err)
-			continue
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
+		return result, nil
 
-		fmt.Println("[Otus Agent] TCP client connected")
-		go s.handleConnection(conn)
-	}
-}
-
-// handleConnection manages a client connection, reading and processing RPC requests
-func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	// Create persistent shell for this connection
-	shell, err := NewPersistentShell(DefaultCwd)
-	if err != nil {
-		fmt.Printf("[Otus Agent] Failed to create persistent shell: %v\n", err)
-		return
-	}
-	defer shell.Close()
-
-	ctx := &ConnectionContext{
-		shell:  shell,
-		server: s,
-	}
-
-	fmt.Println("[Otus Agent] TCP client connected (persistent shell ready)")
-	defer fmt.Println("[Otus Agent] Client disconnected")
-
-	reader := bufio.NewReader(conn)
-
-	for {
-		line, err := reader.ReadString('\n')
+	case "write_file":
+		var params WriteFileParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := ctx.server.handleWriteFile(&params)
 		if err != nil {
-			if err != io.EOF {
-				fmt.Printf("[Otus Agent] Read error: %v\n", err)
-			}
-			return
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
+		return result, nil
 
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	case "list_dir":
+		var params ListDirParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-
-		var req RPCRequest
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			s.sendError(conn, nil, ParseError, "Parse error", nil)
-			continue
-		}
-
-		response := ctx.handleRPCRequest(&req)
-		respBytes, _ := json.Marshal(response)
-		data := append(respBytes, '\n')
-
-		// Write all bytes (important for large responses like sync_from_guest)
-		written := 0
-		for written < len(data) {
-			n, err := conn.Write(data[written:])
-			if err != nil {
-				fmt.Printf("[Otus Agent] TCP write error: %v\n", err)
-				return
-			}
-			written += n
-		}
-	}
-}
-
-// sendError sends an error response to the client
-func (s *Server) sendError(conn net.Conn, id interface{}, code int, message string, data interface{}) {
-	resp := RPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &RPCError{
-			Code:    code,
-			Message: message,
-			Data:    data,
-		},
-	}
-	respBytes, _ := json.Marshal(resp)
-	respData := append(respBytes, '\n')
-
-	// Ensure all bytes are written
-	written := 0
-	for written < len(respData) {
-		n, err := conn.Write(respData[written:])
+		result, err := ctx.server.handleListDir(&params)
 		if err != nil {
-			fmt.Printf("[Otus Agent] Error write failed: %v\n", err)
-			return
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
-		written += n
+		return result, nil
+
+	case "sync_to_guest":
+		var params SyncToGuestParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := ctx.server.handleSyncToGuest(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	case "sync_from_guest":
+		var params SyncFromGuestParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := ctx.server.handleSyncFromGuest(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	default:
+		return nil, &jsonrpc2.Error{Code: MethodNotFound, Message: "Method not found"}
 	}
 }
 
