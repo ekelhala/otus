@@ -103,3 +103,23 @@ export const LLM = {
   /** Number of RAG results to include in context */
   RAG_RESULTS: 10,
 } as const;
+
+/**
+ * Global Configuration (User's home directory)
+ */
+export const GLOBAL_CONFIG = {
+  /** Global Otus directory in user's home */
+  DIR: ".otus",
+  /** Credentials file for API keys */
+  CREDENTIALS_FILE: "credentials.json",
+} as const;
+
+/**
+ * Supported credential key names
+ */
+export const CREDENTIAL_KEYS = [
+  "anthropic_api_key",
+  "voyage_api_key",
+] as const;
+
+export type CredentialKey = typeof CREDENTIAL_KEYS[number];
