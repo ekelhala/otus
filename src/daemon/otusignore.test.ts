@@ -268,16 +268,26 @@ describe("VM Sync Integration Tests", () => {
     await new Promise((resolve) => setTimeout(resolve, 5000));
 
     client = new GuestAgentClient();
+    let connected = false;
     for (let i = 0; i < 10; i++) {
       try {
         await client.connect();
         console.log("Connected to VM agent");
-        return;
+        connected = true;
+        break;
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
-    throw new Error("Failed to connect to VM");
+    
+    if (!connected) {
+      throw new Error("Failed to connect to VM");
+    }
+
+    // Ensure /workspace directory exists and is clean
+    console.log("Setting up /workspace directory...");
+    await client.execute("mkdir -p /workspace && rm -rf /workspace/* /workspace/.*[!.] 2>/dev/null || true");
+    console.log("Workspace ready");
   }, 60000);
 
   afterAll(async () => {
@@ -286,36 +296,27 @@ describe("VM Sync Integration Tests", () => {
   });
 
   test("file created in VM syncs back to host", async () => {
-    // Create a Python file directly in the VM
-    await client.execute(`cat > /workspace/vm_created.py << 'EOF'
-print("Hello from VM!")
-x = 1 + 2
-print(f"Result: {x}")
-EOF`);
+    // Create a Python file directly in the VM (avoid heredocs with persistent shell)
+    await client.execute(`printf 'print("Hello from VM!")\\nx = 1 + 2\\nprint(f"Result: {x}")\\n' > /workspace/vm_created.py`);
 
     // Verify file exists in VM
     const catResult = await client.execute("cat /workspace/vm_created.py");
     expect(catResult.stdout).toContain("Hello from VM!");
 
     // Sync from guest with no excludes
+    console.log("Starting sync from guest...");
     const syncResult = await client.syncFromGuest("/workspace", []);
+    console.log(`Sync completed, received ${syncResult.size} bytes`);
     expect(syncResult.size).toBeGreaterThan(0);
 
     // Extract and verify Python file is present
     const contents = await listTarContents(syncResult.tarData);
     expect(contents.some((f) => f.includes("vm_created.py"))).toBe(true);
-  });
+  }, 120000); // Increased timeout for VM operations
 
   test("excludes are applied during sync back", async () => {
     // Create files in VM including some that should be excluded
-    await client.execute(`
-      mkdir -p /workspace/node_modules
-      echo '{}' > /workspace/node_modules/package.json
-      echo 'print("keep me")' > /workspace/keep.py
-      echo 'temp' > /workspace/test.tmp
-      mkdir -p /workspace/.git
-      echo 'config' > /workspace/.git/config
-    `);
+    await client.execute("mkdir -p /workspace/node_modules && echo '{}' > /workspace/node_modules/package.json && echo 'print(\"keep me\")' > /workspace/keep.py && echo 'temp' > /workspace/test.tmp && mkdir -p /workspace/.git && echo 'config' > /workspace/.git/config");
 
     // Verify files exist in VM
     const lsResult = await client.execute("ls -la /workspace/");
@@ -336,16 +337,11 @@ EOF`);
     expect(contents.some((f) => f.includes("node_modules"))).toBe(false);
     expect(contents.some((f) => f.includes(".git"))).toBe(false);
     expect(contents.some((f) => f.includes("test.tmp"))).toBe(false);
-  });
+  }, 120000);
 
   test("Python .py files sync when .pyc excluded", async () => {
     // Create Python source and compiled files
-    await client.execute(`
-      echo 'def main(): pass' > /workspace/source.py
-      echo 'compiled bytecode' > /workspace/source.pyc
-      mkdir -p /workspace/__pycache__
-      echo 'cache' > /workspace/__pycache__/source.cpython.pyc
-    `);
+    await client.execute("echo 'def main(): pass' > /workspace/source.py && echo 'compiled bytecode' > /workspace/source.pyc && mkdir -p /workspace/__pycache__ && echo 'cache' > /workspace/__pycache__/source.cpython.pyc");
 
     // Sync with excludes that should NOT affect .py files
     const excludes = ["__pycache__", "*.pyc", "*.pyo"];
@@ -358,17 +354,11 @@ EOF`);
     // .pyc and __pycache__ should be excluded
     expect(contents.some((f) => f.includes("source.pyc"))).toBe(false);
     expect(contents.some((f) => f.includes("__pycache__"))).toBe(false);
-  });
+  }, 120000);
 
   test("empty excludes means all files sync", async () => {
     // Create files that would normally be excluded
-    await client.execute(`
-      mkdir -p /workspace/testall
-      echo 'code' > /workspace/testall/app.py
-      echo 'temp' > /workspace/testall/data.tmp
-      mkdir -p /workspace/testall/.hidden
-      echo 'secret' > /workspace/testall/.hidden/file
-    `);
+    await client.execute("mkdir -p /workspace/testall && echo 'code' > /workspace/testall/app.py && echo 'temp' > /workspace/testall/data.tmp && mkdir -p /workspace/testall/.hidden && echo 'secret' > /workspace/testall/.hidden/file");
 
     // Sync with NO excludes
     const syncResult = await client.syncFromGuest("/workspace/testall", []);
@@ -378,16 +368,11 @@ EOF`);
     expect(contents.some((f) => f.includes("app.py"))).toBe(true);
     expect(contents.some((f) => f.includes("data.tmp"))).toBe(true);
     expect(contents.some((f) => f.includes(".hidden"))).toBe(true);
-  });
+  }, 120000);
 
   test("sync many files works", async () => {
     // Create many files in VM
-    await client.execute(`
-      mkdir -p /workspace/manyfiles
-      for i in $(seq 1 50); do
-        echo "file $i content" > /workspace/manyfiles/file_$i.txt
-      done
-    `);
+    await client.execute("mkdir -p /workspace/manyfiles && for i in $(seq 1 50); do echo 'file $i content' > /workspace/manyfiles/file_$i.txt; done");
 
     const syncResult = await client.syncFromGuest("/workspace/manyfiles", []);
     const contents = await listTarContents(syncResult.tarData);
@@ -396,5 +381,5 @@ EOF`);
     expect(contents.some((f) => f.includes("file_1.txt"))).toBe(true);
     expect(contents.some((f) => f.includes("file_25.txt"))).toBe(true);
     expect(contents.some((f) => f.includes("file_50.txt"))).toBe(true);
-  });
+  }, 120000);
 });
