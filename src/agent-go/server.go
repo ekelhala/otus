@@ -20,6 +20,31 @@ const (
 	TCPPort = 9999
 )
 
+// fdConn wraps a file descriptor to implement io.Reader/Writer
+// This approach is used by the reference implementation for reliable vsock communication
+type fdConn struct {
+	fd int
+}
+
+func (c *fdConn) Read(p []byte) (n int, err error) {
+	n, err = unix.Read(c.fd, p)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+func (c *fdConn) Write(p []byte) (n int, err error) {
+	return unix.Write(c.fd, p)
+}
+
+func (c *fdConn) Close() error {
+	return unix.Close(c.fd)
+}
+
 // Server manages the guest agent's network listeners and connections
 type Server struct {
 	startTime time.Time
@@ -86,18 +111,59 @@ func (s *Server) startVSockListener() {
 
 		fmt.Println("[Otus Agent] VSock client connected")
 
-		file := os.NewFile(uintptr(nfd), "vsock")
-		conn, err := net.FileConn(file)
-		file.Close()
+		// Use direct fd wrapper for reliable vsock communication
+		// This approach matches the reference implementation
+		go s.handleVSockConnection(nfd)
+	}
+}
 
+// handleVSockConnection handles a vsock connection using raw fd
+func (s *Server) handleVSockConnection(fd int) {
+	conn := &fdConn{fd: fd}
+	defer conn.Close()
+	defer fmt.Println("[Otus Agent] VSock client disconnected")
+
+	reader := bufio.NewReader(conn)
+
+	for {
+		line, err := reader.ReadString('\n')
 		if err != nil {
-			fmt.Printf("[Otus Agent] Failed to create conn from VSock fd: %v\n", err)
-			unix.Close(nfd)
+			if err != io.EOF {
+				fmt.Printf("[Otus Agent] VSock read error: %v\n", err)
+			}
+			return
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
-		go s.handleConnection(conn)
+		var req RPCRequest
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			s.sendErrorRaw(conn, nil, ParseError, "Parse error", nil)
+			continue
+		}
+
+		response := s.handleRPCRequest(&req)
+		respBytes, _ := json.Marshal(response)
+		conn.Write(append(respBytes, '\n'))
 	}
+}
+
+// sendErrorRaw sends an error response using raw fd writer
+func (s *Server) sendErrorRaw(w io.Writer, id interface{}, code int, message string, data interface{}) {
+	resp := RPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &RPCError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+	}
+	respBytes, _ := json.Marshal(resp)
+	w.Write(append(respBytes, '\n'))
 }
 
 // startTCPListener creates and manages the TCP listener
