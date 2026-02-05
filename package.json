@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "bun build src/cli/otus.ts --outdir dist --target bun",
-    "build:agent": "cd src/agent-go && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o ../../dist/otus-agent .",
+    "build:agent": "cd src/agent-go && make build",
     "dev": "bun src/cli/otus.ts",
     "setup:network": "sudo ./infra/setup-tap-pool.sh",
     "check:network": "sudo ./infra/check-tap-pool.sh",
