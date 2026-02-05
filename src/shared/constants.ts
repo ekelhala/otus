@@ -69,7 +69,7 @@ export const WORKSPACE = {
  */
 export const EXECUTION = {
   /** Default command timeout in seconds */
-  DEFAULT_TIMEOUT: 300,
+  DEFAULT_TIMEOUT: 30,
   /** Default working directory in guest */
   DEFAULT_CWD: "/workspace",
   /** Maximum number of ReAct loop iterations */
