@@ -39,17 +39,17 @@ const tools: Anthropic.Tool[] = [
   {
     name: "run_cmd",
     description:
-      "Execute a shell command in the isolated VM sandbox. Commands run directly in the shell and BLOCK until completion or timeout. For long-running processes (servers, watch modes, etc.), run them in the background with & or use tools like nohup. The command runs in /workspace which contains the project files.",
+      "Execute a shell command in the isolated VM sandbox. The shell is PERSISTENT - environment changes (cd, export, source) persist between calls. You can activate a Python venv in one call and use it in subsequent calls. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory starts at /workspace (contains project files) but persists if you cd elsewhere.",
     input_schema: {
       type: "object",
       properties: {
         command: {
           type: "string",
-          description: "The shell command to execute. Use & for background processes, or the command will block until done/timeout.",
+          description: "The shell command to execute. Environment persists between calls. Use & to background long-running processes.",
         },
         timeout: {
           type: "number",
-          description: "Timeout in seconds (default: 300). Command is killed if it exceeds this.",
+          description: "Timeout in seconds (default: 300). Command is killed if exceeded.",
         },
       },
       required: ["command"],

@@ -303,20 +303,20 @@ export class GuestAgentClient {
   }
 
   /**
-   * Sync files to the guest VM
+   * Sync files to the guest VM using tar
    */
   async syncToGuest(
-    files: Array<{ path: string; content: string; mode?: number }>,
+    tarData: Buffer,
     basePath = "/workspace"
   ): Promise<{
+    success: boolean;
     filesWritten: number;
-    errors: Array<{ path: string; error: string }>;
+    error?: string;
   }> {
-    // Use longer timeout for sync operations as they may need to write many files
     const response = await this.connection.request("sync_to_guest", {
-      files,
+      tarData: tarData.toString("base64"),
       basePath,
-    }, 120000); // 2 minute timeout for sync operations
+    }, 300000); // 5 minute timeout for large syncs
 
     if (response.error) {
       throw new Error(`Sync to guest failed: ${response.error.message}`);
@@ -326,25 +326,29 @@ export class GuestAgentClient {
   }
 
   /**
-   * Sync files from the guest VM
+   * Sync files from the guest VM using tar
    */
   async syncFromGuest(
     basePath = "/workspace",
-    since?: number
+    excludes?: string[]
   ): Promise<{
-    files: Array<{ path: string; content: string; mtime: number }>;
+    tarData: Buffer;
+    size: number;
   }> {
-    // Use longer timeout for sync operations as they may need to read many files
     const response = await this.connection.request("sync_from_guest", {
       basePath,
-      since,
-    }, 120000); // 2 minute timeout for sync operations
+      excludes,
+    }, 300000); // 5 minute timeout for large syncs
 
     if (response.error) {
       throw new Error(`Sync from guest failed: ${response.error.message}`);
     }
 
-    return response.result as any;
+    const result = response.result as { tarData: string; size: number };
+    return {
+      tarData: Buffer.from(result.tarData, "base64"),
+      size: result.size,
+    };
   }
 
   /**

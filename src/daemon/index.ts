@@ -3,9 +3,10 @@
  * Main orchestrator that coordinates all components
  */
 
-import { mkdir, readFile, writeFile, readdir, stat } from "fs/promises";
+import { mkdir, readFile, writeFile, mkdtemp, rm } from "fs/promises";
 import { existsSync } from "fs";
-import { join, relative } from "path";
+import { join } from "path";
+import { tmpdir } from "os";
 import { WORKSPACE, FIRECRACKER } from "@shared/constants.ts";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { GuestAgentClient } from "./vsock.ts";
@@ -364,121 +365,120 @@ export class OtusDaemon {
   }
 
   /**
-   * Sync workspace files to the guest VM
+   * Sync workspace files to the guest VM using tar
    */
   private async syncWorkspaceToGuest(): Promise<void> {
     if (!this.agentClient) {
       throw new Error("Agent client not connected");
     }
 
-    const files: Array<{ path: string; content: string; mode?: number }> = [];
+    console.log("[Otus] Creating tar archive of workspace...");
     
-    // Collect all files from workspace
-    await this.collectWorkspaceFiles(this.config.workspacePath, files);
+    // Create tar archive of workspace
+    const tarData = await this.createWorkspaceTar();
     
-    if (files.length === 0) {
+    if (!tarData || tarData.length === 0) {
       console.log("[Otus] No files to sync");
       return;
     }
 
-    console.log(`[Otus] Syncing ${files.length} files to VM...`);
+    console.log(`[Otus] Syncing workspace to VM (${(tarData.length / 1024).toFixed(1)}KB compressed)...`);
     
-    // Sync in batches to avoid overwhelming the connection
-    const batchSize = 50;
-    for (let i = 0; i < files.length; i += batchSize) {
-      const batch = files.slice(i, i + batchSize);
-      const result = await this.agentClient.syncToGuest(batch);
-      
-      if (result.errors.length > 0) {
-        console.warn(`[Otus] Sync errors:`, result.errors);
-      }
+    const result = await this.agentClient.syncToGuest(tarData);
+    
+    if (!result.success) {
+      throw new Error(`Sync failed: ${result.error}`);
     }
+    
+    console.log(`[Otus] ✓ Workspace synced to VM (${result.filesWritten} files)`);
   }
 
   /**
-   * Collect files from workspace directory
+   * Create a tar.gz archive of the workspace
    */
-  private async collectWorkspaceFiles(
-    dirPath: string,
-    files: Array<{ path: string; content: string; mode?: number }>,
-    basePath = this.config.workspacePath
-  ): Promise<void> {
-    const entries = await readdir(dirPath, { withFileTypes: true });
+  private async createWorkspaceTar(): Promise<Buffer> {
+    const excludes = [
+      "--exclude=node_modules",
+      "--exclude=.venv",
+      "--exclude=venv",
+      "--exclude=.env",
+      "--exclude=__pycache__",
+      "--exclude=.git",
+      "--exclude=.svn",
+      "--exclude=*.pyc",
+      "--exclude=.pytest_cache",
+      "--exclude=.mypy_cache",
+      "--exclude=dist",
+      "--exclude=build",
+      "--exclude=*.egg-info",
+      "--exclude=.DS_Store",
+      "--exclude=.idea",
+      "--exclude=.vscode",
+      "--exclude=*.log",
+      "--exclude=.coverage",
+      "--exclude=htmlcov",
+      "--exclude=.cache",
+      "--exclude=.next",
+      "--exclude=.nuxt",
+      "--exclude=target",
+      "--exclude=.terraform",
+      `--exclude=${WORKSPACE.OTUS_DIR}`,
+    ];
     
-    for (const entry of entries) {
-      // Skip hidden files, node_modules, and .otus directory
-      if (entry.name.startsWith('.') || 
-          entry.name === 'node_modules' ||
-          entry.name === '__pycache__' ||
-          entry.name === '.git' ||
-          entry.name === WORKSPACE.OTUS_DIR) {
-        continue;
-      }
-      
-      const fullPath = join(dirPath, entry.name);
-      const relativePath = relative(basePath, fullPath);
-      
-      if (entry.isDirectory()) {
-        await this.collectWorkspaceFiles(fullPath, files, basePath);
-      } else {
-        try {
-          const stats = await stat(fullPath);
-          
-          // Skip large files (> 5MB)
-          if (stats.size > 5 * 1024 * 1024) {
-            console.log(`[Otus] Skipping large file: ${relativePath} (${(stats.size / 1024 / 1024).toFixed(1)}MB)`);
-            continue;
-          }
-          
-          const content = await readFile(fullPath);
-          files.push({
-            path: relativePath,
-            content: content.toString('base64'),
-          });
-        } catch (error) {
-          console.warn(`[Otus] Failed to read file ${relativePath}:`, error);
-        }
-      }
-    }
+    const proc = Bun.spawn(
+      ["tar", "-czf", "-", ...excludes, "-C", this.config.workspacePath, "."],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    
+    const output = await new Response(proc.stdout).arrayBuffer();
+    await proc.exited;
+    
+    return Buffer.from(output);
   }
 
   /**
-   * Sync workspace files from the guest VM back to host
+   * Sync workspace files from the guest VM back to host using tar
    */
   private async syncWorkspaceFromGuest(since?: number): Promise<void> {
     if (!this.agentClient) {
       throw new Error("Agent client not connected");
     }
 
-    const result = await this.agentClient.syncFromGuest("/workspace", since);
+    console.log("[Otus] Fetching workspace from VM...");
     
-    if (result.files.length === 0) {
+    const result = await this.agentClient.syncFromGuest("/workspace");
+    
+    if (!result.tarData || result.tarData.length === 0) {
       console.log("[Otus] No files changed in VM");
       return;
     }
 
-    console.log(`[Otus] Syncing ${result.files.length} files from VM...`);
+    console.log(`[Otus] Extracting ${(result.tarData.length / 1024).toFixed(1)}KB from VM...`);
     
-    let syncedCount = 0;
-
-    for (const file of result.files) {
-      const targetPath = join(this.config.workspacePath, file.path);
+    // Write tar to temp file and extract
+    const tmpDir = await mkdtemp(join(tmpdir(), "otus-sync-"));
+    const tarFile = join(tmpDir, "workspace.tar.gz");
+    
+    try {
+      await writeFile(tarFile, result.tarData);
       
-      try {
-        // Ensure directory exists
-        const dir = targetPath.substring(0, targetPath.lastIndexOf('/'));
-        if (dir && !existsSync(dir)) {
-          await mkdir(dir, { recursive: true });
-        }
-        
-        // Decode and write file
-        const content = Buffer.from(file.content, 'base64');
-        await writeFile(targetPath, content);
-        syncedCount++;
-      } catch (error) {
-        console.warn(`[Otus] Failed to write file ${file.path}:`, error);
+      // Extract to workspace
+      const proc = Bun.spawn(
+        ["tar", "-xzf", tarFile, "-C", this.config.workspacePath],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      
+      await proc.exited;
+      
+      if (proc.exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        throw new Error(`tar extract failed: ${stderr}`);
       }
+      
+      console.log("[Otus] ✓ Workspace synced from VM");
+    } finally {
+      // Cleanup temp files
+      await rm(tmpDir, { recursive: true, force: true });
     }
-    console.log(`[Otus] ✓ Workspace sync from VM complete, synced ${syncedCount} files`);
   }
 }
