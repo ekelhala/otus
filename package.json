@@ -14,7 +14,9 @@
     "setup:network": "sudo ./infra/setup-tap-pool.sh",
     "check:network": "sudo ./infra/check-tap-pool.sh",
     "remove:network": "sudo ./infra/remove-tap-pool.sh",
-    "test": "bun test"
+    "test": "bun test",
+    "test:unit": "bun test -t 'parseIgnoreFile|tar exclude'",
+    "test:integration": "bun test -t 'VM Sync'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
