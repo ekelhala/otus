@@ -6,7 +6,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { LLM, EXECUTION } from "@shared/constants.ts";
-import type { GuestAgentClient } from "./vsock.ts";
+import type { SandboxManager } from "./sandbox.ts";
 import type { EpisodicMemory } from "./memory/episodic.ts";
 import type { SemanticMemory } from "./memory/semantic.ts";
 
@@ -26,7 +26,7 @@ const REPETITION_WINDOW = 10;
 
 export interface InferenceEngineConfig {
   apiKey: string;
-  agentClient: GuestAgentClient;
+  sandboxManager: SandboxManager;
   episodicMemory: EpisodicMemory;
   semanticMemory: SemanticMemory;
   workspacePath: string;
@@ -37,15 +37,87 @@ export interface InferenceEngineConfig {
  */
 const tools: Anthropic.Tool[] = [
   {
+    name: "start_sandbox",
+    description:
+      "Start a new isolated VM sandbox environment. The sandbox provides a safe Linux environment for executing commands. You must start a sandbox before running commands. You can have multiple sandboxes running simultaneously for testing different configurations.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Optional human-readable name for this sandbox (e.g., 'testing', 'build-env')",
+        },
+        sync_workspace: {
+          type: "boolean",
+          description: "Whether to sync the workspace files to the sandbox immediately (default: true)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "stop_sandbox",
+    description:
+      "Stop and destroy a sandbox VM. Any unsaved changes in the sandbox will be lost unless you sync back first.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox to stop. If not provided, stops the active sandbox.",
+        },
+        sync_back: {
+          type: "boolean",
+          description: "Whether to sync workspace changes back to host before stopping (default: true)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "list_sandboxes",
+    description:
+      "List all running sandboxes with their status, uptime, and IP addresses.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "sync_workspace",
+    description:
+      "Sync workspace files between host and sandbox. Use 'to_sandbox' to push files to the VM, or 'from_sandbox' to pull changes back to host.",
+    input_schema: {
+      type: "object",
+      properties: {
+        direction: {
+          type: "string",
+          enum: ["to_sandbox", "from_sandbox"],
+          description: "Direction of sync: 'to_sandbox' pushes host files to VM, 'from_sandbox' pulls VM changes to host",
+        },
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox to sync with. If not provided, uses the active sandbox.",
+        },
+      },
+      required: ["direction"],
+    },
+  },
+  {
     name: "run_cmd",
     description:
-      "Execute a shell command in the isolated VM sandbox. The shell is PERSISTENT - environment changes (cd, export, source) persist between calls. You can activate a Python venv in one call and use it in subsequent calls. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory starts at /workspace (contains project files) but persists if you cd elsewhere.",
+      "Execute a shell command in a sandbox VM. The shell is PERSISTENT within each sandbox - environment changes (cd, export, source) persist between calls. You must start a sandbox first. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory starts at /workspace (contains project files) but persists if you cd elsewhere.",
     input_schema: {
       type: "object",
       properties: {
         command: {
           type: "string",
           description: "The shell command to execute. Environment persists between calls. Use & to background long-running processes.",
+        },
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox to run in. If not provided, uses the active sandbox.",
         },
         timeout: {
           type: "number",
@@ -77,7 +149,7 @@ const tools: Anthropic.Tool[] = [
   {
     name: "task_complete",
     description:
-      "Signal that the task has been completed successfully. Include a summary of what was accomplished and key takeaways.",
+      "Signal that the current task/request has been completed. Include a summary of what was accomplished. This ends the current turn and returns control to the user.",
     input_schema: {
       type: "object",
       properties: {
@@ -101,60 +173,85 @@ const tools: Anthropic.Tool[] = [
  */
 export class InferenceEngine {
   private readonly client: Anthropic;
-  private readonly agentClient: GuestAgentClient;
+  private readonly sandboxManager: SandboxManager;
   private readonly episodicMemory: EpisodicMemory;
   private readonly semanticMemory: SemanticMemory;
   private readonly workspacePath: string;
   private actionHistory: ActionRecord[] = [];
+  /** Conversation history for interactive mode */
+  private messages: Anthropic.MessageParam[] = [];
+  /** Current session ID */
+  private sessionId: string = "";
 
   constructor(config: InferenceEngineConfig) {
     this.client = new Anthropic({ apiKey: config.apiKey });
-    this.agentClient = config.agentClient;
+    this.sandboxManager = config.sandboxManager;
     this.episodicMemory = config.episodicMemory;
     this.semanticMemory = config.semanticMemory;
     this.workspacePath = config.workspacePath;
   }
 
   /**
-   * Execute a task using the ReAct loop
+   * Start a new interactive session
    */
-  async executeTask(taskId: string, goal: string): Promise<void> {
-    console.log(`\n[InferenceEngine] Starting task: ${goal}`);
-
-    // Reset action history for new task
+  startSession(): string {
+    this.sessionId = `session-${Date.now()}`;
+    this.messages = [];
     this.actionHistory = [];
+    
+    // Create session in episodic memory
+    this.episodicMemory.createTask(this.sessionId, "Interactive session");
+    
+    console.log(`[InferenceEngine] Started session: ${this.sessionId}`);
+    return this.sessionId;
+  }
 
-    const messages: Anthropic.MessageParam[] = [
-      {
-        role: "user",
-        content: this.buildInitialPrompt(goal),
-      },
-    ];
+  /**
+   * Process a user message in interactive mode
+   * Returns when the agent completes its turn (calls task_complete or needs user input)
+   */
+  async chat(userMessage: string): Promise<{ complete: boolean; summary?: string }> {
+    if (!this.sessionId) {
+      this.startSession();
+    }
+
+    console.log(`\n[InferenceEngine] Processing: ${userMessage.substring(0, 100)}${userMessage.length > 100 ? "..." : ""}`);
+
+    // Add user message to conversation
+    const fullMessage = this.messages.length === 0
+      ? this.buildInitialPrompt(userMessage)
+      : userMessage;
+
+    this.messages.push({
+      role: "user",
+      content: fullMessage,
+    });
 
     let iteration = 0;
-    let taskComplete = false;
+    let turnComplete = false;
+    let completionSummary: string | undefined;
     let consecutiveStuckCount = 0;
 
-    while (iteration < EXECUTION.MAX_ITERATIONS && !taskComplete) {
+    while (iteration < EXECUTION.MAX_ITERATIONS && !turnComplete) {
       iteration++;
       console.log(`\n[InferenceEngine] Iteration ${iteration}/${EXECUTION.MAX_ITERATIONS}`);
 
       // Log thinking phase
-      this.episodicMemory.logEvent(taskId, "think", {
+      this.episodicMemory.logEvent(this.sessionId, "think", {
         iteration,
-        context: "Starting iteration",
+        context: "Processing user request",
       });
 
       // Call Claude
       const response = await this.client.messages.create({
         model: LLM.MODEL,
         max_tokens: LLM.MAX_TOKENS,
-        messages,
+        messages: this.messages,
         tools,
       });
 
       // Add assistant response to messages
-      messages.push({
+      this.messages.push({
         role: "assistant",
         content: response.content,
       });
@@ -165,10 +262,17 @@ export class InferenceEngine {
       // Log any text output (thinking)
       if (textContent) {
         console.log(`\n[Claude] ${textContent}`);
-        this.episodicMemory.logEvent(taskId, "think", {
+        this.episodicMemory.logEvent(this.sessionId, "think", {
           iteration,
           thought: textContent,
         });
+      }
+
+      // Check if Claude wants to stop (no tool calls and end_turn)
+      if (toolCalls.length === 0 && response.stop_reason === "end_turn") {
+        // Claude is done with its turn
+        turnComplete = true;
+        continue;
       }
 
       // Execute tool calls
@@ -187,7 +291,7 @@ export class InferenceEngine {
           if (consecutiveStuckCount >= 3) {
             // Force a reflection break
             console.log(`\n[InferenceEngine] Forcing reflection due to repeated stuck state`);
-            messages.push({
+            this.messages.push({
               role: "user",
               content: this.buildStuckRecoveryPrompt(repetitionWarning),
             });
@@ -204,19 +308,20 @@ export class InferenceEngine {
           this.recordAction(toolCall, iteration);
 
           // Log action
-          this.episodicMemory.logEvent(taskId, "act", {
+          this.episodicMemory.logEvent(this.sessionId, "act", {
             iteration,
             tool: toolCall.name,
             input: toolCall.input,
           });
 
           try {
-            const result = await this.executeTool(taskId, toolCall);
+            const result = await this.executeTool(this.sessionId, toolCall);
 
             // Check if task is complete
             if (toolCall.name === "task_complete") {
-              taskComplete = true;
-              console.log(`\n[InferenceEngine] Task completed: ${result}`);
+              turnComplete = true;
+              completionSummary = (toolCall.input as any).summary;
+              console.log(`\n[InferenceEngine] Turn complete: ${completionSummary}`);
             }
 
             // Add tool result
@@ -227,7 +332,7 @@ export class InferenceEngine {
             });
 
             // Log observation
-            this.episodicMemory.logEvent(taskId, "observe", {
+            this.episodicMemory.logEvent(this.sessionId, "observe", {
               iteration,
               tool: toolCall.name,
               result,
@@ -243,7 +348,7 @@ export class InferenceEngine {
               is_error: true,
             });
 
-            this.episodicMemory.logEvent(taskId, "observe", {
+            this.episodicMemory.logEvent(this.sessionId, "observe", {
               iteration,
               tool: toolCall.name,
               error: errorMessage,
@@ -251,39 +356,54 @@ export class InferenceEngine {
           }
         }
 
-        messages.push(toolResults);
+        this.messages.push(toolResults);
 
         // Inject action summary periodically to help Claude track progress
         if (iteration % 5 === 0 && iteration > 0) {
           const summary = this.summarizeRecentActions();
           if (summary) {
-            messages.push({
+            this.messages.push({
               role: "user",
               content: `[Progress Check] You've completed ${iteration} iterations. Recent actions:\n${summary}\n\nContinue working toward the goal.`,
             });
           }
         }
       } else {
-        // No tool calls, task might be stuck
+        // No tool calls and didn't end turn, prompt for action
         consecutiveStuckCount++;
         console.log(`\n[InferenceEngine] No tool calls made (${consecutiveStuckCount}x), prompting for action`);
         
         const actionSummary = this.summarizeRecentActions();
-        messages.push({
+        this.messages.push({
           role: "user",
-          content: `Please take an action using one of the available tools to make progress on the task.${actionSummary ? `\n\nHere's what you've already tried:\n${actionSummary}` : ""}`,
+          content: `Please take an action using one of the available tools to make progress, or call task_complete if you're done.${actionSummary ? `\n\nHere's what you've already tried:\n${actionSummary}` : ""}`,
         });
       }
     }
 
-    if (!taskComplete) {
-      console.log("\n[InferenceEngine] Max iterations reached without completion");
-      this.episodicMemory.logEvent(taskId, "reflect", {
+    if (iteration >= EXECUTION.MAX_ITERATIONS) {
+      console.log("\n[InferenceEngine] Max iterations reached");
+      this.episodicMemory.logEvent(this.sessionId, "reflect", {
         status: "incomplete",
         reason: "max_iterations_reached",
         iterations: iteration,
       });
     }
+
+    return { complete: turnComplete, summary: completionSummary };
+  }
+
+  /**
+   * Legacy method for single-task execution (wraps chat)
+   */
+  async executeTask(taskId: string, goal: string): Promise<void> {
+    this.sessionId = taskId;
+    this.messages = [];
+    this.actionHistory = [];
+    
+    this.episodicMemory.createTask(taskId, goal);
+    
+    await this.chat(goal);
   }
 
   /**
@@ -294,6 +414,18 @@ export class InferenceEngine {
     toolCall: Anthropic.ToolUseBlock
   ): Promise<any> {
     switch (toolCall.name) {
+      case "start_sandbox":
+        return await this.startSandbox(toolCall.input as any);
+
+      case "stop_sandbox":
+        return await this.stopSandbox(toolCall.input as any);
+
+      case "list_sandboxes":
+        return await this.listSandboxes();
+
+      case "sync_workspace":
+        return await this.syncWorkspace(toolCall.input as any);
+
       case "run_cmd":
         return await this.executeCommand(toolCall.input as any);
 
@@ -309,15 +441,105 @@ export class InferenceEngine {
   }
 
   /**
-   * Execute a command in the VM
+   * Start a new sandbox VM
+   */
+  private async startSandbox(input: {
+    name?: string;
+    sync_workspace?: boolean;
+  }): Promise<string> {
+    const sandbox = await this.sandboxManager.startSandbox(input.name);
+
+    // Sync workspace by default unless explicitly disabled
+    if (input.sync_workspace !== false) {
+      const syncResult = await this.sandboxManager.syncToSandbox(sandbox.id);
+      return `Sandbox started successfully.
+ID: ${sandbox.id}
+${sandbox.name ? `Name: ${sandbox.name}` : ""}
+IP: ${sandbox.guestIp}
+Workspace synced: ${syncResult.filesWritten} files`;
+    }
+
+    return `Sandbox started successfully.
+ID: ${sandbox.id}
+${sandbox.name ? `Name: ${sandbox.name}` : ""}
+IP: ${sandbox.guestIp}
+Workspace not synced (use sync_workspace to push files)`;
+  }
+
+  /**
+   * Stop a sandbox VM
+   */
+  private async stopSandbox(input: {
+    sandbox_id?: string;
+    sync_back?: boolean;
+  }): Promise<string> {
+    const syncBack = input.sync_back !== false; // Default true
+    const sandboxId = input.sandbox_id;
+
+    if (sandboxId) {
+      await this.sandboxManager.stopSandbox(sandboxId, syncBack);
+      return `Sandbox ${sandboxId} stopped. Workspace ${syncBack ? "synced back" : "not synced"}.`;
+    } else {
+      const activeSandbox = this.sandboxManager.getActiveSandbox();
+      if (!activeSandbox) {
+        return "No active sandbox to stop.";
+      }
+      await this.sandboxManager.stopSandbox(activeSandbox.id, syncBack);
+      return `Sandbox ${activeSandbox.id} stopped. Workspace ${syncBack ? "synced back" : "not synced"}.`;
+    }
+  }
+
+  /**
+   * List all running sandboxes
+   */
+  private async listSandboxes(): Promise<string> {
+    const sandboxes = await this.sandboxManager.listSandboxes();
+
+    if (sandboxes.length === 0) {
+      return "No sandboxes running. Use start_sandbox to create one.";
+    }
+
+    const activeSandbox = this.sandboxManager.getActiveSandbox();
+    const lines = sandboxes.map((sb) => {
+      const isActive = activeSandbox?.id === sb.id ? " [ACTIVE]" : "";
+      return `- ${sb.id}${sb.name ? ` (${sb.name})` : ""}${isActive}
+  IP: ${sb.guestIp || "no network"}
+  Uptime: ${sb.uptime.toFixed(0)}s
+  Workspace: ${sb.workspaceSynced ? "synced" : "not synced"}`;
+    });
+
+    return `Running sandboxes:\n${lines.join("\n")}`;
+  }
+
+  /**
+   * Sync workspace between host and sandbox
+   */
+  private async syncWorkspace(input: {
+    direction: "to_sandbox" | "from_sandbox";
+    sandbox_id?: string;
+  }): Promise<string> {
+    if (input.direction === "to_sandbox") {
+      const result = await this.sandboxManager.syncToSandbox(input.sandbox_id);
+      return `Synced ${result.filesWritten} files to sandbox.`;
+    } else {
+      const result = await this.sandboxManager.syncFromSandbox(input.sandbox_id);
+      return `Synced ${(result.size / 1024).toFixed(1)}KB from sandbox to host.`;
+    }
+  }
+
+  /**
+   * Execute a command in a sandbox
    */
   private async executeCommand(input: {
     command: string;
+    sandbox_id?: string;
     timeout?: number;
   }): Promise<string> {
-    const result = await this.agentClient.execute(input.command, {
+    const result = await this.sandboxManager.executeInSandbox(input.command, {
+      sandboxId: input.sandbox_id,
       timeout: input.timeout || EXECUTION.DEFAULT_TIMEOUT,
     });
+    console.log(`\n[Command Result] stdout: ${result.stdout.substring(0, 200)}${result.stdout.length > 200 ? "..." : ""}`);
 
     // Format output
     let output = "";
@@ -380,27 +602,31 @@ ${result.content}
    * Build the initial prompt with context
    */
   private buildInitialPrompt(goal: string): string {
-    return `You are Otus, an autonomous system engineering agent. You have access to an isolated Linux VM where you can safely execute commands.
+    return `You are Otus, an autonomous system engineering agent. You can create isolated Linux VM sandboxes to safely execute commands.
 
-Your goal: ${goal}
+Your request: ${goal}
 
-You have three tools available:
-1. run_cmd: Execute shell commands in the VM
-2. search_code: Semantically search the codebase
-3. task_complete: Signal when the task is finished
+Available tools:
+1. start_sandbox: Start a new VM sandbox (required before running commands)
+2. stop_sandbox: Stop a sandbox VM
+3. list_sandboxes: List running sandboxes
+4. sync_workspace: Sync files between host and sandbox
+5. run_cmd: Execute shell commands in a sandbox. The shell is persistent, so environment changes persist between calls. Use & to background long-running processes.
+6. search_code: Semantically search the codebase
+7. task_complete: Signal when you're done (returns control to user)
 
-Working directory: The VM has access to /workspace which contains the project files.
+Workflow:
+1. Start a sandbox with start_sandbox (this boots a VM and syncs workspace)
+2. Execute commands with run_cmd to implement, test, or investigate. Run commands in sequence to build on previous results. Use the persistent shell to maintain state.
+3. Search the codebase with search_code if needed
+4. Use sync_workspace to push/pull file changes
+5. When done, call task_complete with a summary
 
-Approach:
-1. Understand the goal and break it down into steps
-2. Search the codebase to understand existing code
-3. Execute commands to implement, test, or investigate
-4. Iterate based on results
-5. When complete, call task_complete with a summary
+You can have multiple sandboxes for different purposes (e.g., testing different configurations).
 
 Think carefully about each action. Be methodical and verify your work.
 
-Begin by analyzing the goal and deciding on your first action.`;
+Begin by analyzing the request and deciding on your first action.`;
   }
 
   /**

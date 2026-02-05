@@ -234,9 +234,9 @@ export class GuestAgentClient {
   private connection: VSockConnection;
 
   constructor(
-    socketPath = FIRECRACKER.VSOCK_SOCKET,
-    guestCid = VSOCK.GUEST_CID,
-    port = VSOCK.AGENT_PORT
+    socketPath: string = FIRECRACKER.VSOCK_SOCKET,
+    guestCid: number = VSOCK.GUEST_CID,
+    port: number = VSOCK.AGENT_PORT
   ) {
     this.connection = new VSockConnection({
       socketPath,
