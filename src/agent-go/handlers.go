@@ -54,7 +54,8 @@ func (s *Server) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
 
 	startTime := time.Now()
 
-	cmd := exec.Command("sh", "-c", command)
+	// Use bash instead of sh for better compatibility (source, arrays, etc.)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	for k, v := range params.Env {
