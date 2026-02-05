@@ -7,6 +7,7 @@
 import { Command } from "commander";
 import { resolve } from "path";
 import { existsSync } from "fs";
+import prompts from "prompts";
 import { WORKSPACE, CREDENTIAL_KEYS, type CredentialKey } from "@shared/constants.ts";
 import { OtusDaemon } from "@daemon/index.ts";
 import { 
@@ -319,7 +320,18 @@ configCmd
     let apiKey = value;
     if (!apiKey) {
       try {
-        apiKey = await Bun.password(`Enter ${key}: `);
+        const response = await prompts({
+          type: 'password',
+          name: 'value',
+          message: `Enter ${key}:`,
+        });
+        
+        if (!response.value) {
+          console.error("\nCancelled");
+          process.exit(1);
+        }
+        
+        apiKey = response.value;
       } catch (error) {
         console.error("\nError reading input");
         process.exit(1);
