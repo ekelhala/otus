@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ROOTFS_SIZE="${ROOTFS_SIZE:-1G}"
+ROOTFS_SIZE="${ROOTFS_SIZE:-4G}"
 UBUNTU_RELEASE="${UBUNTU_RELEASE:-noble}"  # Ubuntu 24.04 LTS
 INSTALL_DIR="./infra"
 ROOTFS_DIR="${INSTALL_DIR}/rootfs-build"
@@ -52,7 +52,7 @@ deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_RELEASE}-security main universe
 EOF
 
 # Install additional packages via chroot (with proper mounts)
-echo "==> Installing Python packages (pip, venv)"
+echo "==> Installing Python and Node.js packages"
 
 # Mount necessary filesystems for chroot
 sudo mount --bind /proc "${ROOTFS_DIR}/proc"
@@ -61,7 +61,7 @@ sudo mount --bind /dev "${ROOTFS_DIR}/dev"
 sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 
 # Run apt-get in chroot
-sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv && apt-get clean && rm -rf /var/lib/apt/lists/*"
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm && apt-get clean && rm -rf /var/lib/apt/lists/*"
 
 # Unmount in reverse order
 sudo umount "${ROOTFS_DIR}/dev/pts" || true
@@ -69,7 +69,7 @@ sudo umount "${ROOTFS_DIR}/dev" || true
 sudo umount "${ROOTFS_DIR}/sys" || true
 sudo umount "${ROOTFS_DIR}/proc" || true
 
-echo "✓ Python packages installed"
+echo "✓ Python and Node.js packages installed"
 
 # Configure the rootfs
 echo "==> Configuring rootfs"
