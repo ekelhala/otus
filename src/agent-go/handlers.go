@@ -252,48 +252,6 @@ func (s *Server) handleListDir(params *ListDirParams) (*ListDirResult, error) {
 	return &ListDirResult{Entries: entries}, nil
 }
 
-// Default exclude patterns for sync operations
-var defaultExcludes = []string{
-	"node_modules",
-	".venv",
-	"venv",
-	".env",
-	"__pycache__",
-	".git",
-	".svn",
-	".hg",
-	"*.pyc",
-	"*.pyo",
-	".pytest_cache",
-	".mypy_cache",
-	".tox",
-	".nox",
-	"dist",
-	"build",
-	"*.egg-info",
-	".eggs",
-	"*.so",
-	"*.dylib",
-	".DS_Store",
-	"Thumbs.db",
-	".idea",
-	".vscode",
-	"*.log",
-	".coverage",
-	"htmlcov",
-	".cache",
-	".parcel-cache",
-	".next",
-	".nuxt",
-	"target",  // Rust
-	"vendor",  // Go (when not needed)
-	"Pods",    // iOS
-	"*.class", // Java
-	".gradle",
-	".terraform",
-	"*.tfstate*",
-}
-
 // handleSyncToGuest extracts a tar.gz archive to the guest filesystem
 func (s *Server) handleSyncToGuest(params *SyncToGuestParams) (*SyncToGuestResult, error) {
 	basePath := params.BasePath
@@ -353,10 +311,10 @@ func (s *Server) handleSyncFromGuest(params *SyncFromGuestParams) (*SyncFromGues
 		return &SyncFromGuestResult{TarData: "", Size: 0}, nil
 	}
 
-	// Build exclude arguments
-	excludes := append(defaultExcludes, params.Excludes...)
-	excludeArgs := make([]string, 0, len(excludes)*2)
-	for _, pattern := range excludes {
+	// Build exclude arguments from host-provided patterns only
+	// (no default excludes - .otusignore on host is the single source of truth)
+	excludeArgs := make([]string, 0, len(params.Excludes)*2)
+	for _, pattern := range params.Excludes {
 		excludeArgs = append(excludeArgs, "--exclude="+pattern)
 	}
 
@@ -388,17 +346,8 @@ func (s *Server) handleSyncFromGuest(params *SyncFromGuestParams) (*SyncFromGues
 	}, nil
 }
 
-// shouldSkip determines if a file or directory should be skipped
+// shouldSkip determines if a file or directory should be skipped during listing
+// Note: No default excludes - .otusignore on host is the single source of truth for sync
 func shouldSkip(name string, isDir bool) bool {
-	if strings.HasPrefix(name, ".") {
-		return true
-	}
-	if isDir {
-		for _, exclude := range defaultExcludes {
-			if name == exclude {
-				return true
-			}
-		}
-	}
 	return false
 }
