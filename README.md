@@ -87,10 +87,47 @@ cd /path/to/your/project
 bun run dev init
 ```
 
-This creates `.otus/` with:
-- SQLite database for episodic memory
-- LanceDB vector index of your codebase
-- Configuration
+This creates:
+- `.otus/` directory with SQLite database for episodic memory, LanceDB vector index, and configuration
+- `.otusignore` file with sensible defaults (you can customize it for your project)
+
+### Exclude files from sync
+
+The `.otusignore` file is automatically created during initialization with sensible defaults. **This file is the single source of truth** for what gets excluded from workspace sync between host and guest. You can customize it for your project's needs.
+
+```bash
+# Example .otusignore
+# Uses tar's pattern matching syntax
+
+# Version control
+.git
+
+# Dependencies
+node_modules
+.venv
+
+# Build outputs
+dist
+build
+
+# Environment files
+.env
+
+# Otus internal directory
+.otus
+```
+
+You can also specify a custom ignore file path:
+
+```bash
+bun run dev do "your task" --otusignore-file /path/to/custom-ignore
+```
+
+**Important notes:**
+- Without a `.otusignore` file, nothing is excluded by default
+- The `.otusignore` file itself is always synced to both host and guest
+- Patterns are applied in both directions (host→guest and guest→host)
+- Uses tar's glob pattern syntax (e.g., `*.log`, `node_modules`, `build`)
 
 ### Run a task
 ```bash

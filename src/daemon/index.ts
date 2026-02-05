@@ -19,6 +19,7 @@ export interface DaemonConfig {
   workspacePath: string;
   anthropicApiKey: string;
   voyageApiKey: string;
+  otusIgnoreFile?: string;
 }
 
 export interface TaskResult {
@@ -34,6 +35,7 @@ export interface TaskResult {
 export class OtusDaemon {
   private readonly config: DaemonConfig;
   private readonly otusPath: string;
+  private readonly otusIgnoreFile: string;
   
   private episodicMemory: EpisodicMemory | null = null;
   private semanticMemory: SemanticMemory | null = null;
@@ -45,6 +47,8 @@ export class OtusDaemon {
   constructor(config: DaemonConfig) {
     this.config = config;
     this.otusPath = join(config.workspacePath, WORKSPACE.OTUS_DIR);
+    // Default to .otusignore in workspace root if not specified
+    this.otusIgnoreFile = config.otusIgnoreFile || join(config.workspacePath, ".otusignore");
   }
 
   /**
@@ -120,6 +124,99 @@ export class OtusDaemon {
         created: new Date().toISOString(),
       };
       await Bun.write(configPath, JSON.stringify(config, null, 2));
+    }
+
+    // Create default .otusignore file if it doesn't exist
+    const otusignorePath = join(this.config.workspacePath, ".otusignore");
+    if (!existsSync(otusignorePath)) {
+      const defaultIgnore = `# Otus Ignore File
+# This file is the single source of truth for excluding files/directories from
+# workspace sync between host and guest VM. Uses tar's pattern matching syntax.
+#
+# Pattern rules:
+# - Patterns match paths relative to workspace root
+# - Use wildcards: *.log, test_*.py
+# - Match directories without trailing slash: node_modules, build
+# - Comments start with #
+# - One pattern per line
+#
+# Note: This file (.otusignore) is always synced and never excluded.
+
+# Otus internal directory (memory, indexes, etc.)
+.otus
+
+# Version control
+.git
+.svn
+.hg
+
+# Dependencies
+node_modules
+.venv
+venv
+vendor
+Pods
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.tox
+.nox
+*.egg-info
+.eggs
+
+# Build outputs
+dist
+build
+target
+.next
+.nuxt
+.cache
+.parcel-cache
+
+# IDE and editors
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Test coverage
+.coverage
+htmlcov
+coverage
+
+# Terraform
+.terraform
+*.tfstate
+*.tfstate.backup
+
+# Java/Gradle
+*.class
+.gradle
+
+# Custom directories (uncomment if needed)
+# scratch
+# experiments
+`;
+      await Bun.write(otusignorePath, defaultIgnore);
+      console.log("[Otus] ✓ Created default .otusignore");
     }
 
     // Initialize episodic memory
@@ -394,36 +491,28 @@ export class OtusDaemon {
   }
 
   /**
+   * Parse ignore file and return patterns
+   */
+  private async parseIgnoreFile(filePath: string): Promise<string[]> {
+    try {
+      const content = await readFile(filePath, "utf-8");
+      return content
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"));
+    } catch (error) {
+      // Ignore file doesn't exist or can't be read
+      return [];
+    }
+  }
+
+  /**
    * Create a tar.gz archive of the workspace
    */
   private async createWorkspaceTar(): Promise<Buffer> {
-    const excludes = [
-      "--exclude=node_modules",
-      "--exclude=.venv",
-      "--exclude=venv",
-      "--exclude=.env",
-      "--exclude=__pycache__",
-      "--exclude=.git",
-      "--exclude=.svn",
-      "--exclude=*.pyc",
-      "--exclude=.pytest_cache",
-      "--exclude=.mypy_cache",
-      "--exclude=dist",
-      "--exclude=build",
-      "--exclude=*.egg-info",
-      "--exclude=.DS_Store",
-      "--exclude=.idea",
-      "--exclude=.vscode",
-      "--exclude=*.log",
-      "--exclude=.coverage",
-      "--exclude=htmlcov",
-      "--exclude=.cache",
-      "--exclude=.next",
-      "--exclude=.nuxt",
-      "--exclude=target",
-      "--exclude=.terraform",
-      `--exclude=${WORKSPACE.OTUS_DIR}`,
-    ];
+    // Read exclude patterns from .otusignore (single source of truth)
+    const patterns = await this.parseIgnoreFile(this.otusIgnoreFile);
+    const excludes = patterns.map((pattern) => `--exclude=${pattern}`);
     
     const proc = Bun.spawn(
       ["tar", "-czf", "-", ...excludes, "-C", this.config.workspacePath, "."],
@@ -446,7 +535,10 @@ export class OtusDaemon {
 
     console.log("[Otus] Fetching workspace from VM...");
     
-    const result = await this.agentClient.syncFromGuest("/workspace");
+    // Read user-specified ignore patterns (guest will apply them)
+    const userExcludes = await this.parseIgnoreFile(this.otusIgnoreFile);
+    
+    const result = await this.agentClient.syncFromGuest("/workspace", userExcludes);
     
     if (!result.tarData || result.tarData.length === 0) {
       console.log("[Otus] No files changed in VM");

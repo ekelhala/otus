@@ -116,6 +116,7 @@ program
   .description("Execute a task autonomously")
   .argument("<goal>", "Task description or goal")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
+  .option("--otusignore-file <path>", "Path to .otusignore file (defaults to .otusignore in workspace root)")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (goal, options) => {
     const workspacePath = resolve(options.dir);

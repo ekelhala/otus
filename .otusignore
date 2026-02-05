@@ -1,0 +1,87 @@
+# Otus Ignore File
+# This file is the single source of truth for excluding files/directories from
+# workspace sync between host and guest VM. Uses tar's pattern matching syntax.
+#
+# Pattern rules:
+# - Patterns match paths relative to workspace root
+# - Use wildcards: *.log, test_*.py
+# - Match directories without trailing slash: node_modules, build
+# - Comments start with #
+# - One pattern per line
+#
+# Note: This file (.otusignore) is always synced and never excluded.
+
+# Otus internal directory (memory, indexes, etc.)
+.otus
+
+# Version control
+.git
+.svn
+.hg
+
+# Dependencies
+node_modules
+.venv
+venv
+vendor
+Pods
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.tox
+.nox
+*.egg-info
+.eggs
+
+# Build outputs
+dist
+build
+target
+.next
+.nuxt
+.cache
+.parcel-cache
+
+# IDE and editors
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Test coverage
+.coverage
+htmlcov
+coverage
+
+# Terraform
+.terraform
+*.tfstate
+*.tfstate.backup
+
+# Java/Gradle
+*.class
+.gradle
+
+# Custom directories (uncomment if needed)
+# scratch
+# experiments
+
+

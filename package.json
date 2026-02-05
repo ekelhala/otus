@@ -8,7 +8,7 @@
     "otus": "./dist/otus"
   },
   "scripts": {
-    "build": "bun build src/cli/otus.ts --outdir dist --target bun",
+    "build": "bun build src/cli/otus.ts --compile --outfile dist/otus",
     "build:agent": "cd src/agent-go && make build",
     "dev": "bun src/cli/otus.ts",
     "setup:network": "sudo ./infra/setup-tap-pool.sh",
