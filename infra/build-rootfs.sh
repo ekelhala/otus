@@ -77,8 +77,24 @@ echo "==> Configuring rootfs"
 # Set hostname
 echo "otus-vm" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
 
+# Configure /etc/hosts for localhost resolution
+sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null <<EOF
+127.0.0.1   localhost
+127.0.1.1   otus-vm
+::1         localhost ip6-localhost ip6-loopback
+EOF
+
 # Configure networking
 sudo mkdir -p "${ROOTFS_DIR}/etc/systemd/network"
+
+# Configure loopback interface (required for localhost)
+sudo tee "${ROOTFS_DIR}/etc/systemd/network/10-loopback.network" > /dev/null <<EOF
+[Match]
+Name=lo
+
+[Network]
+Address=127.0.0.1/8
+EOF
 
 # Create link file to ensure eth0 is always brought up
 sudo tee "${ROOTFS_DIR}/etc/systemd/network/10-eth0.link" > /dev/null <<EOF
