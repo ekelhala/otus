@@ -2,6 +2,19 @@
  * Otus System Constants
  */
 
+import { existsSync } from "fs";
+import { join } from "path";
+
+/**
+ * System Paths - where VM assets are installed system-wide
+ */
+export const SYSTEM_PATHS = {
+  /** System-wide Otus directory (production) */
+  SYSTEM_DIR: "/etc/otus",
+  /** Local development directory */
+  LOCAL_DIR: "./infra",
+} as const;
+
 /**
  * VSock Configuration
  */
@@ -24,11 +37,73 @@ export const FIRECRACKER = {
   VSOCK_SOCKET: "/tmp/firecracker-vsock.socket",
   /** VM configuration template */
   CONFIG_PATH: "./infra/vm-config.json",
-  /** Kernel image path */
-  KERNEL_PATH: "./infra/vmlinux.bin",
-  /** Root filesystem image */
-  ROOTFS_PATH: "./infra/rootfs.ext4",
+  /** Kernel image filename */
+  KERNEL_FILENAME: "vmlinux.bin",
+  /** Root filesystem image filename */
+  ROOTFS_FILENAME: "rootfs.ext4",
 } as const;
+
+/**
+ * VM Assets paths resolved at runtime.
+ * Checks /etc/otus first (production), falls back to ./infra (development).
+ */
+export interface VMAssetPaths {
+  kernelPath: string;
+  rootfsPath: string;
+  source: "system" | "local";
+}
+
+/**
+ * Environment detection
+ * Set OTUS_ENV=production for production mode
+ */
+export const isProduction = process.env.OTUS_ENV === "production";
+
+/**
+ * Resolve VM asset paths.
+ * In production (OTUS_ENV=production): uses /etc/otus
+ * In development: uses ./infra
+ */
+export function resolveVMAssets(): VMAssetPaths | null {
+  if (isProduction) {
+    // Production: only check system path
+    const systemKernel = join(SYSTEM_PATHS.SYSTEM_DIR, FIRECRACKER.KERNEL_FILENAME);
+    const systemRootfs = join(SYSTEM_PATHS.SYSTEM_DIR, FIRECRACKER.ROOTFS_FILENAME);
+    
+    if (existsSync(systemKernel) && existsSync(systemRootfs)) {
+      return {
+        kernelPath: systemKernel,
+        rootfsPath: systemRootfs,
+        source: "system",
+      };
+    }
+    return null;
+  }
+  
+  // Development: only check local path
+  const localKernel = join(SYSTEM_PATHS.LOCAL_DIR, FIRECRACKER.KERNEL_FILENAME);
+  const localRootfs = join(SYSTEM_PATHS.LOCAL_DIR, FIRECRACKER.ROOTFS_FILENAME);
+  
+  if (existsSync(localKernel) && existsSync(localRootfs)) {
+    return {
+      kernelPath: localKernel,
+      rootfsPath: localRootfs,
+      source: "local",
+    };
+  }
+  
+  return null;
+}
+
+/**
+ * Get human-readable instructions for missing VM assets
+ */
+export function getVMAssetInstructions(): string {
+  if (isProduction) {
+    return `VM assets not found at ${SYSTEM_PATHS.SYSTEM_DIR}. Install vmlinux.bin and rootfs.ext4.`;
+  }
+  return `VM assets not found. Run ./infra/build-kernel.sh and ./infra/build-rootfs.sh`;
+}
 
 /**
  * Network Configuration

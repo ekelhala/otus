@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile, mkdtemp, rm } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { WORKSPACE, FIRECRACKER } from "@shared/constants.ts";
+import { WORKSPACE, resolveVMAssets, getVMAssetInstructions } from "@shared/constants.ts";
 import { findFirecrackerBinary } from "./firecracker.ts";
 import { EpisodicMemory } from "./memory/episodic.ts";
 import { SemanticMemory } from "./memory/semantic.ts";
@@ -64,18 +64,10 @@ export class OtusDaemon {
       );
     }
 
-    // Check for kernel
-    if (!existsSync(FIRECRACKER.KERNEL_PATH)) {
-      issues.push(
-        `Kernel not found at ${FIRECRACKER.KERNEL_PATH}. Run ./infra/build-kernel.sh`
-      );
-    }
-
-    // Check for rootfs
-    if (!existsSync(FIRECRACKER.ROOTFS_PATH)) {
-      issues.push(
-        `Rootfs not found at ${FIRECRACKER.ROOTFS_PATH}. Run ./infra/build-rootfs.sh`
-      );
+    // Check for kernel and rootfs
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) {
+      issues.push(getVMAssetInstructions());
     }
 
     // Check KVM access (Linux only)

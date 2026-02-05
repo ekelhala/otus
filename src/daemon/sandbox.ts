@@ -9,7 +9,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { GuestAgentClient } from "./vsock.ts";
-import { FIRECRACKER, VSOCK } from "../shared/constants.ts";
+import { VSOCK, resolveVMAssets, getVMAssetInstructions, SYSTEM_PATHS } from "../shared/constants.ts";
 
 /**
  * Sandbox instance representing a single VM
@@ -80,18 +80,10 @@ export class SandboxManager {
       );
     }
 
-    // Check for kernel
-    if (!existsSync(FIRECRACKER.KERNEL_PATH)) {
-      issues.push(
-        `Kernel not found at ${FIRECRACKER.KERNEL_PATH}. Run ./infra/build-kernel.sh`
-      );
-    }
-
-    // Check for rootfs
-    if (!existsSync(FIRECRACKER.ROOTFS_PATH)) {
-      issues.push(
-        `Rootfs not found at ${FIRECRACKER.ROOTFS_PATH}. Run ./infra/build-rootfs.sh`
-      );
+    // Check for kernel and rootfs
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) {
+      issues.push(getVMAssetInstructions());
     }
 
     // Check KVM access (Linux only)
@@ -124,12 +116,10 @@ export class SandboxManager {
       );
     }
 
-    // Check prerequisites
-    if (!existsSync(FIRECRACKER.KERNEL_PATH)) {
-      throw new Error(`Kernel not found at ${FIRECRACKER.KERNEL_PATH}. Run: ./infra/build-kernel.sh`);
-    }
-    if (!existsSync(FIRECRACKER.ROOTFS_PATH)) {
-      throw new Error(`Rootfs not found at ${FIRECRACKER.ROOTFS_PATH}. Run: ./infra/build-rootfs.sh`);
+    // Resolve VM assets (kernel and rootfs)
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) {
+      throw new Error(getVMAssetInstructions());
     }
 
     // Create unique socket paths for this sandbox
@@ -139,12 +129,13 @@ export class SandboxManager {
     };
 
     console.log(`[Sandbox] Starting sandbox ${id}${name ? ` (${name})` : ""}...`);
+    console.log(`[Sandbox] Using VM assets from ${vmAssets.source === "system" ? SYSTEM_PATHS.SYSTEM_DIR : SYSTEM_PATHS.LOCAL_DIR}`);
 
     // Create VM instance
     const vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: sockets.api,
       vsockSocket: sockets.vsock,
       guestCid: cid,

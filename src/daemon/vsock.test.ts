@@ -7,7 +7,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { GuestAgentClient } from "./vsock.ts";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
-import { FIRECRACKER, VSOCK } from "@shared/constants.ts";
+import { FIRECRACKER, VSOCK, resolveVMAssets } from "@shared/constants.ts";
 
 describe("VM Integration Tests", () => {
   let client: GuestAgentClient;
@@ -22,10 +22,15 @@ describe("VM Integration Tests", () => {
     }
     console.log(`Using firecracker binary: ${binaryPath}`);
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) {
+      throw new Error("VM assets not found. Run ./infra/build-kernel.sh and ./infra/build-rootfs.sh");
+    }
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -175,10 +180,13 @@ describe("VM File System Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -301,10 +309,13 @@ describe("VM Package Management Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -383,10 +394,13 @@ describe("VM Process and Environment Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -486,10 +500,13 @@ describe("VM Python Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -591,10 +608,13 @@ describe("VM Node.js Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
@@ -693,10 +713,13 @@ describe("VM Stress Tests", () => {
     const binaryPath = await findFirecrackerBinary();
     if (!binaryPath) throw new Error("Firecracker not found");
     
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) throw new Error("VM assets not found");
+    
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,

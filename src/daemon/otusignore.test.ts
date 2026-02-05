@@ -11,7 +11,7 @@ import { tmpdir } from "os";
 import { $ } from "bun";
 import { GuestAgentClient } from "./vsock.ts";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
-import { FIRECRACKER, VSOCK } from "@shared/constants.ts";
+import { FIRECRACKER, VSOCK, resolveVMAssets } from "@shared/constants.ts";
 
 /**
  * Parse ignore file (same implementation as in daemon)
@@ -253,10 +253,15 @@ describe("VM Sync Integration Tests", () => {
       throw new Error("Firecracker binary not found");
     }
 
+    const vmAssets = resolveVMAssets();
+    if (!vmAssets) {
+      throw new Error("VM assets not found");
+    }
+
     vm = new FirecrackerVM({
       binaryPath,
-      kernelPath: FIRECRACKER.KERNEL_PATH,
-      rootfsPath: FIRECRACKER.ROOTFS_PATH,
+      kernelPath: vmAssets.kernelPath,
+      rootfsPath: vmAssets.rootfsPath,
       apiSocket: FIRECRACKER.API_SOCKET,
       vsockSocket: FIRECRACKER.VSOCK_SOCKET,
       guestCid: VSOCK.GUEST_CID,
