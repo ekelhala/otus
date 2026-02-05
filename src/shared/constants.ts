@@ -21,7 +21,7 @@ export const FIRECRACKER = {
   /** Unix socket for Firecracker API */
   API_SOCKET: "/tmp/firecracker.socket",
   /** Unix socket for VSock proxy */
-  VSOCK_SOCKET: "./v.sock",
+  VSOCK_SOCKET: "/tmp/firecracker-vsock.socket",
   /** VM configuration template */
   CONFIG_PATH: "./infra/vm-config.json",
   /** Kernel image path */
