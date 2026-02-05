@@ -4,8 +4,10 @@
  */
 
 import { spawn, type Subprocess } from "bun";
-import { unlink } from "fs/promises";
+import { unlink, copyFile } from "fs/promises";
 import { existsSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { $ } from "bun";
 import { getTapPool, type TapDevice } from "./tap-pool";
 
@@ -69,6 +71,7 @@ export class FirecrackerVM {
   private process: Subprocess | null = null;
   private readonly config: Required<FirecrackerConfig>;
   private tapDevice: TapDevice | null = null;
+  private tempRootfsPath: string | null = null;
 
   constructor(config: FirecrackerConfig) {
     this.config = {
@@ -130,6 +133,11 @@ export class FirecrackerVM {
 
     // Clean up any existing sockets
     await this.cleanupSockets();
+
+    // Copy rootfs to temp file to avoid persisting changes
+    this.tempRootfsPath = join(tmpdir(), `firecracker-rootfs-${Date.now()}-${process.pid}.ext4`);
+    await copyFile(this.config.rootfsPath, this.tempRootfsPath);
+    console.log(`[Firecracker] Using temp rootfs: ${this.tempRootfsPath}`);
 
     // Start Firecracker process
     console.log("[Firecracker] Starting VM...");
@@ -195,7 +203,7 @@ export class FirecrackerVM {
   private async configureBlockDevice(): Promise<void> {
     await this.apiRequest("PUT", "/drives/rootfs", {
       drive_id: "rootfs",
-      path_on_host: this.config.rootfsPath,
+      path_on_host: this.tempRootfsPath ?? this.config.rootfsPath,
       is_root_device: true,
       is_read_only: false,
     });
@@ -324,6 +332,18 @@ export class FirecrackerVM {
     }
 
     await this.cleanupSockets();
+
+    // Clean up temp rootfs copy
+    if (this.tempRootfsPath) {
+      try {
+        await unlink(this.tempRootfsPath);
+        console.log(`[Firecracker] Cleaned up temp rootfs: ${this.tempRootfsPath}`);
+      } catch {
+        // Ignore if already deleted
+      }
+      this.tempRootfsPath = null;
+    }
+
     console.log("[Firecracker] VM destroyed");
   }
 
