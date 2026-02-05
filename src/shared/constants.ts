@@ -97,7 +97,7 @@ export const EMBEDDINGS = {
  */
 export const LLM = {
   /** Anthropic model */
-  MODEL: "claude-3-haiku-20240307",
+  MODEL: "claude-sonnet-4-5-20250929",
   /** Maximum tokens for completion */
   MAX_TOKENS: 4096,
   /** Number of RAG results to include in context */

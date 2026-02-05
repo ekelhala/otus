@@ -107,7 +107,7 @@ const tools: Anthropic.Tool[] = [
   {
     name: "run_cmd",
     description:
-      "Execute a shell command in a sandbox VM. The shell is PERSISTENT within each sandbox - environment changes (cd, export, source) persist between calls. You must start a sandbox first. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory starts at /workspace (contains project files) but persists if you cd elsewhere.",
+      "Execute a shell command in a sandbox VM. Each command runs in a fresh shell. You must start a sandbox first. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory defaults to /workspace (contains project files).",
     input_schema: {
       type: "object",
       properties: {
@@ -473,7 +473,10 @@ Workspace not synced (use sync_workspace to push files)`;
     sandbox_id?: string;
     sync_back?: boolean;
   }): Promise<string> {
-    const syncBack = input.sync_back !== false; // Default true
+    let syncBack = true;
+    if (!input.sync_back) {
+      input.sync_back = true; // Default to syncing back on stop for safety
+    }
     const sandboxId = input.sandbox_id;
 
     if (sandboxId) {
@@ -611,13 +614,13 @@ Available tools:
 2. stop_sandbox: Stop a sandbox VM
 3. list_sandboxes: List running sandboxes
 4. sync_workspace: Sync files between host and sandbox
-5. run_cmd: Execute shell commands in a sandbox. The shell is persistent, so environment changes persist between calls. Use & to background long-running processes.
+5. run_cmd: Execute shell commands in a sandbox. Each command runs in a fresh shell. Use & to background long-running processes.
 6. search_code: Semantically search the codebase
 7. task_complete: Signal when you're done (returns control to user)
 
 Workflow:
 1. Start a sandbox with start_sandbox (this boots a VM and syncs workspace)
-2. Execute commands with run_cmd to implement, test, or investigate. Run commands in sequence to build on previous results. Use the persistent shell to maintain state.
+2. Execute commands with run_cmd to implement, test, or investigate. Each command runs in a fresh shell - set environment variables and cd in the same command if needed.
 3. Search the codebase with search_code if needed
 4. Use sync_workspace to push/pull file changes
 5. When done, call task_complete with a summary
