@@ -13,7 +13,8 @@
     "dev": "bun src/cli/otus.ts",
     "setup:network": "sudo ./infra/setup-tap-pool.sh",
     "check:network": "sudo ./infra/check-tap-pool.sh",
-    "remove:network": "sudo ./infra/remove-tap-pool.sh"
+    "remove:network": "sudo ./infra/remove-tap-pool.sh",
+    "test": "bun test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
