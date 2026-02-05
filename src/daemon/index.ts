@@ -14,12 +14,14 @@ import { SemanticMemory } from "./memory/semantic.ts";
 import { VoyageClient } from "./embeddings.ts";
 import { InferenceEngine } from "./inference.ts";
 import { SandboxManager } from "./sandbox.ts";
+import { initLogger, getLogger, type Logger } from "@shared/logger.ts";
 
 export interface DaemonConfig {
   workspacePath: string;
   anthropicApiKey: string;
   voyageApiKey: string;
   otusIgnoreFile?: string;
+  verbose?: boolean;
 }
 
 export interface TaskResult {
@@ -36,6 +38,7 @@ export class OtusDaemon {
   private readonly config: DaemonConfig;
   private readonly otusPath: string;
   private readonly otusIgnoreFile: string;
+  private readonly logger: Logger;
   
   private episodicMemory: EpisodicMemory | null = null;
   private semanticMemory: SemanticMemory | null = null;
@@ -48,6 +51,8 @@ export class OtusDaemon {
     this.otusPath = join(config.workspacePath, WORKSPACE.OTUS_DIR);
     // Default to .otusignore in workspace root if not specified
     this.otusIgnoreFile = config.otusIgnoreFile || join(config.workspacePath, ".otusignore");
+    // Initialize logger with verbose setting
+    this.logger = initLogger(config.verbose || false);
   }
 
   /**
@@ -92,7 +97,7 @@ export class OtusDaemon {
    * Initialize the Otus workspace
    */
   async init(): Promise<void> {
-    console.log("[Otus] Initializing workspace...");
+    this.logger.debug("Initializing workspace...");
 
     // Create .otus directory structure
     const dirs = [
@@ -207,12 +212,12 @@ coverage
 # experiments
 `;
       await Bun.write(otusignorePath, defaultIgnore);
-      console.log("[Otus] ✓ Created default .otusignore");
+      this.logger.debug("Created default .otusignore");
     }
 
     // Initialize episodic memory
     this.episodicMemory = new EpisodicMemory(this.config.workspacePath);
-    console.log("[Otus] ✓ Episodic memory initialized");
+    this.logger.debug("Episodic memory initialized");
 
     // Initialize semantic memory
     this.voyageClient = new VoyageClient(this.config.voyageApiKey);
@@ -221,23 +226,23 @@ coverage
       this.voyageClient
     );
     await this.semanticMemory.initialize();
-    console.log("[Otus] ✓ Semantic memory initialized");
+    this.logger.debug("Semantic memory initialized");
 
     // Index the workspace
-    console.log("[Otus] Indexing workspace (this may take a moment)...");
+    this.logger.debug("Indexing workspace (this may take a moment)...");
     await this.semanticMemory.indexWorkspace();
-    console.log("[Otus] ✓ Workspace indexed");
+    this.logger.debug("Workspace indexed");
 
     // Start file watcher
     this.semanticMemory.startWatching();
-    console.log("[Otus] ✓ File watcher started");
+    this.logger.debug("File watcher started");
 
     // Initialize sandbox manager (VMs are started on-demand by the agent)
     this.sandboxManager = new SandboxManager({
       workspacePath: this.config.workspacePath,
       otusIgnoreFile: this.otusIgnoreFile,
     });
-    console.log("[Otus] ✓ Sandbox manager initialized");
+    this.logger.debug("Sandbox manager initialized");
 
     // Initialize inference engine
     this.inferenceEngine = new InferenceEngine({
@@ -246,12 +251,13 @@ coverage
       episodicMemory: this.episodicMemory,
       semanticMemory: this.semanticMemory,
       workspacePath: this.config.workspacePath,
+      logger: this.logger,
     });
-    console.log("[Otus] ✓ Inference engine initialized");
+    this.logger.debug("Inference engine initialized");
 
-    console.log("\n[Otus] Initialization complete!");
-    console.log(`Workspace: ${this.config.workspacePath}`);
-    console.log(`Otus data: ${this.otusPath}`);
+    this.logger.debug("Initialization complete!");
+    this.logger.debug(`Workspace: ${this.config.workspacePath}`);
+    this.logger.debug(`Otus data: ${this.otusPath}`);
   }
 
   /**
@@ -282,14 +288,14 @@ coverage
     const startTime = Date.now();
     const chat = this.startChat();
 
-    console.log(`\n[Otus] Starting task ${chat.sessionId}`);
-    console.log(`Goal: ${goal}\n`);
+    this.logger.debug(`Starting task ${chat.sessionId}`);
+    this.logger.debug(`Goal: ${goal}`);
 
     try {
       const result = await chat.chat(goal);
 
       const duration = Date.now() - startTime;
-      console.log(`\n[Otus] Task ${result.complete ? "completed" : "ended"} in ${(duration / 1000).toFixed(1)}s`);
+      this.logger.debug(`Task ${result.complete ? "completed" : "ended"} in ${(duration / 1000).toFixed(1)}s`);
 
       return {
         taskId: chat.sessionId,
@@ -298,7 +304,8 @@ coverage
         duration,
       };
     } catch (error) {
-      console.error("\n[Otus] Task failed:", error);
+      this.logger.debug("Task failed");
+      this.logger.debug(error instanceof Error ? error.message : String(error));
 
       const duration = Date.now() - startTime;
       return {
@@ -314,11 +321,11 @@ coverage
    * Shutdown the daemon
    */
   async shutdown(): Promise<void> {
-    console.log("\n[Otus] Shutting down daemon...");
+    this.logger.debug("Shutting down daemon...");
 
     // Stop all sandboxes
     if (this.sandboxManager && this.sandboxManager.hasSandboxes()) {
-      console.log("[Otus] Stopping all sandboxes...");
+      this.logger.debug("Stopping all sandboxes...");
       await this.sandboxManager.stopAll();
     }
 
@@ -331,6 +338,6 @@ coverage
       this.episodicMemory.close();
     }
 
-    console.log("[Otus] Goodbye!");
+    this.logger.debug("Goodbye!");
   }
 }

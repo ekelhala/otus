@@ -9,6 +9,7 @@ import { LLM, EXECUTION } from "@shared/constants.ts";
 import type { SandboxManager } from "./sandbox.ts";
 import type { EpisodicMemory } from "./memory/episodic.ts";
 import type { SemanticMemory } from "./memory/semantic.ts";
+import type { Logger } from "@shared/logger.ts";
 
 /**
  * Track executed actions for repetition detection
@@ -30,6 +31,7 @@ export interface InferenceEngineConfig {
   episodicMemory: EpisodicMemory;
   semanticMemory: SemanticMemory;
   workspacePath: string;
+  logger: Logger;
 }
 
 /**
@@ -177,6 +179,7 @@ export class InferenceEngine {
   private readonly episodicMemory: EpisodicMemory;
   private readonly semanticMemory: SemanticMemory;
   private readonly workspacePath: string;
+  private readonly logger: Logger;
   private actionHistory: ActionRecord[] = [];
   /** Conversation history for interactive mode */
   private messages: Anthropic.MessageParam[] = [];
@@ -189,6 +192,7 @@ export class InferenceEngine {
     this.episodicMemory = config.episodicMemory;
     this.semanticMemory = config.semanticMemory;
     this.workspacePath = config.workspacePath;
+    this.logger = config.logger;
   }
 
   /**
@@ -202,7 +206,7 @@ export class InferenceEngine {
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
     
-    console.log(`[InferenceEngine] Started session: ${this.sessionId}`);
+    this.logger.debug(`Started session: ${this.sessionId}`);
     return this.sessionId;
   }
 
@@ -215,7 +219,7 @@ export class InferenceEngine {
       this.startSession();
     }
 
-    console.log(`\n[InferenceEngine] Processing: ${userMessage.substring(0, 100)}${userMessage.length > 100 ? "..." : ""}`);
+    this.logger.debug(`Processing: ${userMessage.substring(0, 100)}${userMessage.length > 100 ? "..." : ""}`);
 
     // Add user message to conversation
     const fullMessage = this.messages.length === 0
@@ -234,7 +238,7 @@ export class InferenceEngine {
 
     while (iteration < EXECUTION.MAX_ITERATIONS && !turnComplete) {
       iteration++;
-      console.log(`\n[InferenceEngine] Iteration ${iteration}/${EXECUTION.MAX_ITERATIONS}`);
+      this.logger.iteration(iteration, EXECUTION.MAX_ITERATIONS);
 
       // Log thinking phase
       this.episodicMemory.logEvent(this.sessionId, "think", {
@@ -261,7 +265,7 @@ export class InferenceEngine {
 
       // Log any text output (thinking)
       if (textContent) {
-        console.log(`\n[Claude] ${textContent}`);
+        this.logger.thinking(textContent);
         this.episodicMemory.logEvent(this.sessionId, "think", {
           iteration,
           thought: textContent,
@@ -286,11 +290,11 @@ export class InferenceEngine {
         const repetitionWarning = this.checkForRepetition(toolCalls, iteration);
         if (repetitionWarning) {
           consecutiveStuckCount++;
-          console.log(`\n[InferenceEngine] Repetition detected (${consecutiveStuckCount}x)`);
+          this.logger.debug(`Repetition detected (${consecutiveStuckCount}x)`);
           
           if (consecutiveStuckCount >= 3) {
             // Force a reflection break
-            console.log(`\n[InferenceEngine] Forcing reflection due to repeated stuck state`);
+            this.logger.debug("Forcing reflection due to repeated stuck state");
             this.messages.push({
               role: "user",
               content: this.buildStuckRecoveryPrompt(repetitionWarning),
@@ -302,7 +306,7 @@ export class InferenceEngine {
         }
 
         for (const toolCall of toolCalls) {
-          console.log(`\n[Tool] ${toolCall.name}(${JSON.stringify(toolCall.input)})`);
+          this.logger.tool(toolCall.name, toolCall.input);
 
           // Track this action
           this.recordAction(toolCall, iteration);
@@ -321,7 +325,7 @@ export class InferenceEngine {
             if (toolCall.name === "task_complete") {
               turnComplete = true;
               completionSummary = (toolCall.input as any).summary;
-              console.log(`\n[InferenceEngine] Turn complete: ${completionSummary}`);
+              this.logger.debug(`Turn complete: ${completionSummary}`);
             }
 
             // Add tool result
@@ -339,7 +343,7 @@ export class InferenceEngine {
             });
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            console.error(`\n[Tool Error] ${errorMessage}`);
+            this.logger.debug(`Tool Error: ${errorMessage}`);
 
             (toolResults.content as Anthropic.ToolResultBlockParam[]).push({
               type: "tool_result",
@@ -371,7 +375,7 @@ export class InferenceEngine {
       } else {
         // No tool calls and didn't end turn, prompt for action
         consecutiveStuckCount++;
-        console.log(`\n[InferenceEngine] No tool calls made (${consecutiveStuckCount}x), prompting for action`);
+        this.logger.debug(`No tool calls made (${consecutiveStuckCount}x), prompting for action`);
         
         const actionSummary = this.summarizeRecentActions();
         this.messages.push({
@@ -382,7 +386,7 @@ export class InferenceEngine {
     }
 
     if (iteration >= EXECUTION.MAX_ITERATIONS) {
-      console.log("\n[InferenceEngine] Max iterations reached");
+      this.logger.debug("Max iterations reached");
       this.episodicMemory.logEvent(this.sessionId, "reflect", {
         status: "incomplete",
         reason: "max_iterations_reached",
@@ -542,7 +546,9 @@ Workspace not synced (use sync_workspace to push files)`;
       sandboxId: input.sandbox_id,
       timeout: input.timeout || EXECUTION.DEFAULT_TIMEOUT,
     });
-    console.log(`\n[Command Result] stdout: ${result.stdout.substring(0, 200)}${result.stdout.length > 200 ? "..." : ""}`);
+    
+    const preview = result.stdout.substring(0, 200);
+    this.logger.toolResult("run_cmd", `${preview}${result.stdout.length > 200 ? "..." : ""}`);
 
     // Format output
     let output = "";

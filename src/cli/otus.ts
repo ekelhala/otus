@@ -8,6 +8,7 @@ import { Command } from "commander";
 import { resolve } from "path";
 import { existsSync } from "fs";
 import prompts from "prompts";
+import chalk from "chalk";
 import { WORKSPACE, CREDENTIAL_KEYS, type CredentialKey } from "@shared/constants.ts";
 import { OtusDaemon } from "@daemon/index.ts";
 import { 
@@ -19,6 +20,7 @@ import {
   getConfiguredKeys,
   getCredentialsPath,
 } from "@shared/credentials.ts";
+import { initLogger, type Logger } from "@shared/logger.ts";
 
 const program = new Command();
 
@@ -54,7 +56,7 @@ function getApiKeys(workspacePath: string): {
 
   // Validate that we have both keys
   if (!anthropicApiKey) {
-    console.error("Error: ANTHROPIC_API_KEY not configured");
+    console.error(chalk.red("Error: ANTHROPIC_API_KEY not configured"));
     console.error("\nSet it using one of:");
     console.error("  • otus config set anthropic_api_key");
     console.error("  • export ANTHROPIC_API_KEY='your-key'");
@@ -62,7 +64,7 @@ function getApiKeys(workspacePath: string): {
   }
 
   if (!voyageApiKey) {
-    console.error("Error: VOYAGE_API_KEY not configured");
+    console.error(chalk.red("Error: VOYAGE_API_KEY not configured"));
     console.error("\nSet it using one of:");
     console.error("  • otus config set voyage_api_key");
     console.error("  • export VOYAGE_API_KEY='your-key'");
@@ -92,13 +94,15 @@ program
   .command("init")
   .description("Initialize Otus in the current workspace")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
+  .option("-v, --verbose", "Show detailed debug output")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (options) => {
+    const logger = initLogger(options.verbose);
     const workspacePath = resolve(options.dir);
-    console.log(`Initializing Otus in ${workspacePath}`);
+    logger.info(`Initializing Otus in ${workspacePath}`);
 
     if (isInitialized(workspacePath)) {
-      console.log("✓ Workspace already initialized");
+      logger.success("Workspace already initialized");
       return;
     }
 
@@ -107,33 +111,37 @@ program
     const daemon = new OtusDaemon({
       workspacePath,
       ...apiKeys,
+      verbose: options.verbose,
     });
 
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
-        console.log("\n[Checking prerequisites...]");
+        logger.startSpinner("Checking prerequisites...");
         const check = await daemon.checkPrerequisites();
         
         if (!check.ok) {
-          console.error("\n✗ Missing prerequisites:");
+          logger.failSpinner("Missing prerequisites");
           for (const issue of check.issues) {
-            console.error(`  • ${issue}`);
+            logger.error(`  ${issue}`);
           }
           console.error("\nPlease resolve these issues before initializing Otus.");
           console.error("Or run with --skip-checks to initialize anyway (not recommended).");
           process.exit(1);
         }
-        console.log("✓ All prerequisites met");
+        logger.succeedSpinner("All prerequisites met");
       }
 
+      logger.startSpinner("Initializing workspace...");
       await daemon.init();
-      console.log("\n✓ Otus initialized successfully!");
+      logger.succeedSpinner("Otus initialized successfully!");
+      
       console.log("\nNext steps:");
       console.log('  otus chat         # Start an interactive session');
       console.log('  otus do "task"    # Execute a single task');
     } catch (error) {
-      console.error("\n✗ Initialization failed:", error);
+      logger.failSpinner("Initialization failed");
+      logger.error(error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });
@@ -146,12 +154,14 @@ program
   .command("chat")
   .description("Start an interactive chat session with Otus")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
+  .option("-v, --verbose", "Show detailed debug output")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (options) => {
+    const logger = initLogger(options.verbose);
     const workspacePath = resolve(options.dir);
 
     if (!isInitialized(workspacePath)) {
-      console.error("Error: Workspace not initialized");
+      logger.error("Workspace not initialized");
       console.error('Run "otus init" first');
       process.exit(1);
     }
@@ -161,6 +171,7 @@ program
     const daemon = new OtusDaemon({
       workspacePath,
       ...apiKeys,
+      verbose: options.verbose,
     });
 
     // Handle graceful shutdown
@@ -180,29 +191,31 @@ program
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
-        console.log("[Checking prerequisites...]");
+        logger.startSpinner("Checking prerequisites...");
         const check = await daemon.checkPrerequisites();
         
         if (!check.ok) {
-          console.error("\n✗ Missing prerequisites:");
+          logger.failSpinner("Missing prerequisites");
           for (const issue of check.issues) {
-            console.error(`  • ${issue}`);
+            logger.error(`  ${issue}`);
           }
           console.error("\nPlease resolve these issues before running.");
           process.exit(1);
         }
-        console.log("✓ Prerequisites OK\n");
+        logger.succeedSpinner("Prerequisites OK");
       }
 
       // Initialize
+      logger.startSpinner("Initializing...");
       await daemon.init();
+      logger.succeedSpinner("Ready");
 
       // Start chat session
       const session = daemon.startChat();
-      console.log("\n" + "=".repeat(60));
-      console.log("Otus Interactive Session");
-      console.log("Type your requests. Press Ctrl+C to exit.");
-      console.log("=".repeat(60) + "\n");
+      console.log("\n" + chalk.cyan("═".repeat(60)));
+      console.log(chalk.bold.cyan("Otus Interactive Session"));
+      console.log(chalk.gray("Type your requests. Press Ctrl+C to exit."));
+      console.log(chalk.cyan("═".repeat(60)) + "\n");
 
       // Interactive loop using prompts
       const readline = await import("readline");
@@ -243,10 +256,12 @@ program
 
           // Process with agent
           console.log("");
+          logger.startSpinner("Processing...");
           const result = await session.chat(userInput);
+          logger.stopSpinner();
           
           if (result.summary) {
-            console.log(`\n[Done] ${result.summary}`);
+            logger.success(result.summary);
           }
         } catch (error) {
           if ((error as any).code === "ERR_USE_AFTER_CLOSE") {
@@ -275,12 +290,14 @@ program
   .description("Execute a single task autonomously (non-interactive)")
   .argument("<goal>", "Task description or goal")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
+  .option("-v, --verbose", "Show detailed debug output")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (goal, options) => {
+    const logger = initLogger(options.verbose);
     const workspacePath = resolve(options.dir);
 
     if (!isInitialized(workspacePath)) {
-      console.error("Error: Workspace not initialized");
+      logger.error("Workspace not initialized");
       console.error('Run "otus init" first');
       process.exit(1);
     }
@@ -290,6 +307,7 @@ program
     const daemon = new OtusDaemon({
       workspacePath,
       ...apiKeys,
+      verbose: options.verbose,
     });
 
     // Handle graceful shutdown
@@ -309,13 +327,13 @@ program
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
-        console.log("[Checking prerequisites...]");
+        logger.startSpinner("Checking prerequisites...");
         const check = await daemon.checkPrerequisites();
         
         if (!check.ok) {
-          console.error("\n✗ Missing prerequisites:");
+          logger.failSpinner("Missing prerequisites");
           for (const issue of check.issues) {
-            console.error(`  • ${issue}`);
+            logger.error(`  ${issue}`);
           }
           console.error("\nPlease resolve these issues before running tasks.");
           console.error("\nSetup steps:");
@@ -324,23 +342,28 @@ program
           console.error("  3. ./infra/build-rootfs.sh");
           process.exit(1);
         }
-        console.log("✓ Prerequisites OK\n");
+        logger.succeedSpinner("Prerequisites OK");
       }
       // Initialize (loads existing indexes)
+      logger.startSpinner("Initializing...");
       await daemon.init();
+      logger.succeedSpinner("Ready");
 
       // Execute task
+      logger.info(`\nGoal: ${chalk.bold(goal)}\n`);
+      logger.startSpinner("Working on task...");
       const result = await daemon.do(goal);
+      logger.stopSpinner();
 
       // Display result
-      console.log("\n" + "=".repeat(60));
+      console.log("\n" + chalk.cyan("═".repeat(60)));
       if (result.status === "completed") {
-        console.log("✓ Task completed successfully");
+        logger.success("Task completed successfully");
       } else {
-        console.log("✗ Task failed");
+        logger.error("Task failed");
       }
-      console.log(`Duration: ${(result.duration / 1000).toFixed(1)}s`);
-      console.log("=".repeat(60));
+      logger.info(`Duration: ${(result.duration / 1000).toFixed(1)}s`);
+      console.log(chalk.cyan("═".repeat(60)));
 
       await daemon.shutdown();
       process.exit(result.status === "completed" ? 0 : 1);
@@ -362,16 +385,16 @@ program
     const workspacePath = resolve(options.dir);
 
     if (!isInitialized(workspacePath)) {
-      console.log("Status: Not initialized");
+      console.log(chalk.yellow("Status: Not initialized"));
       console.log('Run "otus init" to get started');
       return;
     }
 
-    console.log("Status: Initialized");
-    console.log(`Workspace: ${workspacePath}`);
+    console.log(chalk.green("Status: Initialized"));
+    console.log(chalk.gray(`Workspace: ${workspacePath}`));
 
     const otusPath = resolve(workspacePath, WORKSPACE.OTUS_DIR);
-    console.log(`Otus data: ${otusPath}`);
+    console.log(chalk.gray(`Otus data: ${otusPath}`));
 
     // TODO: Could add more status info:
     // - Recent tasks
@@ -386,7 +409,7 @@ program
   .command("check")
   .description("Check system prerequisites for running Otus")
   .action(async () => {
-    console.log("Checking Otus prerequisites...\n");
+    console.log(chalk.bold("Checking Otus prerequisites...\n"));
 
     // We need minimal config to run checks
     // Use empty API keys since we're not actually running inference
@@ -399,25 +422,25 @@ program
     const check = await daemon.checkPrerequisites();
 
     if (check.ok) {
-      console.log("✓ All prerequisites met! You're ready to use Otus.\n");
-      console.log("Next steps:");
+      console.log(chalk.green("✓ All prerequisites met! You're ready to use Otus.\n"));
+      console.log(chalk.bold("Next steps:"));
       console.log("  1. Set API keys:");
-      console.log("     otus config set anthropic_api_key");
-      console.log("     otus config set voyage_api_key");
-      console.log("  2. Initialize workspace: otus init");
-      console.log("  3. Run a task: otus do \"your task\"");
+      console.log(chalk.gray("     otus config set anthropic_api_key"));
+      console.log(chalk.gray("     otus config set voyage_api_key"));
+      console.log("  2. Initialize workspace: " + chalk.cyan("otus init"));
+      console.log("  3. Run a task: " + chalk.cyan('otus do "your task"'));
     } else {
-      console.log("✗ Missing prerequisites:\n");
+      console.log(chalk.red("✗ Missing prerequisites:\n"));
       for (const issue of check.issues) {
-        console.log(`  • ${issue}`);
+        console.log(chalk.yellow(`  • ${issue}`));
       }
-      console.log("\nSetup steps:");
-      console.log("  1. ./infra/setup-firecracker.sh    # Install Firecracker");
-      console.log("  2. ./infra/build-kernel.sh          # Download Linux kernel");
-      console.log("  3. ./infra/build-rootfs.sh          # Build guest filesystem");
-      console.log("\nFor KVM access issues:");
-      console.log("  sudo usermod -aG kvm $USER");
-      console.log("  # Then log out and log back in");
+      console.log(chalk.bold("\nSetup steps:"));
+      console.log(chalk.gray("  1. ./infra/setup-firecracker.sh    # Install Firecracker"));
+      console.log(chalk.gray("  2. ./infra/build-kernel.sh          # Download Linux kernel"));
+      console.log(chalk.gray("  3. ./infra/build-rootfs.sh          # Build guest filesystem"));
+      console.log(chalk.bold("\nFor KVM access issues:"));
+      console.log(chalk.gray("  sudo usermod -aG kvm $USER"));
+      console.log(chalk.gray("  # Then log out and log back in"));
       process.exit(1);
     }
   });
@@ -440,7 +463,7 @@ configCmd
   .action(async (key: string, value?: string) => {
     // Validate key name
     if (!CREDENTIAL_KEYS.includes(key as CredentialKey)) {
-      console.error(`Error: Invalid key '${key}'`);
+      console.error(chalk.red(`Error: Invalid key '${key}'`));
       console.error(`Valid keys: ${CREDENTIAL_KEYS.join(", ")}`);
       process.exit(1);
     }
@@ -456,25 +479,25 @@ configCmd
         });
         
         if (!response.value) {
-          console.error("\nCancelled");
+          console.error(chalk.yellow("\nCancelled"));
           process.exit(1);
         }
         
         apiKey = response.value;
       } catch (error) {
-        console.error("\nError reading input");
+        console.error(chalk.red("\nError reading input"));
         process.exit(1);
       }
     }
 
     if (!apiKey || apiKey.trim() === "") {
-      console.error("Error: Value cannot be empty");
+      console.error(chalk.red("Error: Value cannot be empty"));
       process.exit(1);
     }
 
     // Save credential
     setCredential(key as CredentialKey, apiKey.trim());
-    console.log(`✓ Set ${key}`);
+    console.log(chalk.green(`✓ Set ${key}`));
   });
 
 /**
@@ -487,15 +510,15 @@ configCmd
   .action((key: string) => {
     // Validate key name
     if (!CREDENTIAL_KEYS.includes(key as CredentialKey)) {
-      console.error(`Error: Invalid key '${key}'`);
+      console.error(chalk.red(`Error: Invalid key '${key}'`));
       console.error(`Valid keys: ${CREDENTIAL_KEYS.join(", ")}`);
       process.exit(1);
     }
 
     if (hasCredential(key as CredentialKey)) {
-      console.log(`${key}: ***configured***`);
+      console.log(`${key}: ${chalk.green("***configured***")}`);
     } else {
-      console.log(`${key}: not set`);
+      console.log(`${key}: ${chalk.yellow("not set")}`);
     }
   });
 
@@ -506,14 +529,14 @@ configCmd
   .command("list")
   .description("List all API keys and their configuration status")
   .action(() => {
-    console.log("API Key Configuration:\n");
+    console.log(chalk.bold("API Key Configuration:\n"));
     
     for (const key of CREDENTIAL_KEYS) {
-      const status = hasCredential(key) ? "✓ configured" : "✗ not set";
+      const status = hasCredential(key) ? chalk.green("✓ configured") : chalk.yellow("✗ not set");
       console.log(`  ${key.padEnd(20)} ${status}`);
     }
     
-    console.log(`\nConfig file: ${getCredentialsPath()}`);
+    console.log(chalk.gray(`\nConfig file: ${getCredentialsPath()}`));
   });
 
 /**
@@ -526,13 +549,13 @@ configCmd
   .action((key: string) => {
     // Validate key name
     if (!CREDENTIAL_KEYS.includes(key as CredentialKey)) {
-      console.error(`Error: Invalid key '${key}'`);
+      console.error(chalk.red(`Error: Invalid key '${key}'`));
       console.error(`Valid keys: ${CREDENTIAL_KEYS.join(", ")}`);
       process.exit(1);
     }
 
     unsetCredential(key as CredentialKey);
-    console.log(`✓ Removed ${key}`);
+    console.log(chalk.green(`✓ Removed ${key}`));
   });
 
 /**
