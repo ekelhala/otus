@@ -118,32 +118,6 @@ func (s *Server) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
 	}, nil
 }
 
-// handleExecute executes a command in the persistent shell (ConnectionContext version)
-func (ctx *ConnectionContext) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
-	// Decode command from base64 (all commands are base64-encoded)
-	if params.Command == "" {
-		return nil, fmt.Errorf("no command provided")
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(params.Command)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode base64 command: %w", err)
-	}
-	command := string(decoded)
-
-	// If cwd is specified, prepend cd command
-	if params.Cwd != "" && params.Cwd != DefaultCwd {
-		command = fmt.Sprintf("cd %q && %s", params.Cwd, command)
-	}
-
-	timeout := params.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
-
-	return ctx.shell.Execute(command, timeout, params.Env)
-}
-
 // handleReadFile reads a file and returns its content (base64 encoded)
 func (s *Server) handleReadFile(params *ReadFileParams) (*ReadFileResult, error) {
 	content, err := os.ReadFile(params.Path)

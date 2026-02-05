@@ -71,12 +71,6 @@ type Server struct {
 	startTime time.Time
 }
 
-// ConnectionContext holds per-connection state including persistent shell
-type ConnectionContext struct {
-	shell  *PersistentShell
-	server *Server
-}
-
 // NewServer creates a new Server instance
 func NewServer() *Server {
 	return &Server{
@@ -142,42 +136,29 @@ func (s *Server) handleVSockConnection(fd int) {
 	conn := &fdConn{fd: fd}
 	defer conn.Close()
 
-	// Create persistent shell for this connection
-	shell, err := NewPersistentShell(DefaultCwd)
-	if err != nil {
-		fmt.Printf("[Otus Agent] Failed to create persistent shell: %v\n", err)
-		return
-	}
-	defer shell.Close()
-
-	ctx := &ConnectionContext{
-		shell:  shell,
-		server: s,
-	}
-
-	fmt.Println("[Otus Agent] VSock client connected (persistent shell ready)")
+	fmt.Println("[Otus Agent] VSock client connected")
 	defer fmt.Println("[Otus Agent] VSock client disconnected")
 
 	// Create jsonrpc2 connection with newline-delimited JSON codec
 	stream := jsonrpc2.NewBufferedStream(conn, NewlineObjectCodec{})
-	rpcConn := jsonrpc2.NewConn(context.Background(), stream, jsonrpc2.HandlerWithError(ctx.handle))
+	rpcConn := jsonrpc2.NewConn(context.Background(), stream, jsonrpc2.HandlerWithError(s.handle))
 
 	// Wait for connection to close
 	<-rpcConn.DisconnectNotify()
 }
 
 // handle processes JSON-RPC requests
-func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {
+func (s *Server) handle(c context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {
 	switch req.Method {
 	case "health":
-		return ctx.server.handleHealth(), nil
+		return s.handleHealth(), nil
 
 	case "execute":
 		var params ExecuteParams
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.handleExecute(&params)
+		result, err := s.handleExecute(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
@@ -188,7 +169,7 @@ func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.server.handleReadFile(&params)
+		result, err := s.handleReadFile(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
@@ -199,7 +180,7 @@ func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.server.handleWriteFile(&params)
+		result, err := s.handleWriteFile(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
@@ -210,7 +191,7 @@ func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.server.handleListDir(&params)
+		result, err := s.handleListDir(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
@@ -221,7 +202,7 @@ func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.server.handleSyncToGuest(&params)
+		result, err := s.handleSyncToGuest(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
@@ -232,7 +213,7 @@ func (ctx *ConnectionContext) handle(c context.Context, conn *jsonrpc2.Conn, req
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
 		}
-		result, err := ctx.server.handleSyncFromGuest(&params)
+		result, err := s.handleSyncFromGuest(&params)
 		if err != nil {
 			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
 		}
