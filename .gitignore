@@ -41,6 +41,9 @@ infra/firecracker
 infra/vmlinux.bin
 infra/rootfs.ext4
 infra/rootfs-build/
+infra/*.img
+infra/*.iso
+infra/*.qcow2
 
 # Firecracker runtime
 *.socket

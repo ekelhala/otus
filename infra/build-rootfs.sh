@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build a minimal Ubuntu rootfs for the Firecracker VM
-# Includes the Otus guest agent
+# Build Ubuntu rootfs for Firecracker VM using debootstrap
+# Uses full variant (not minbase) for a more complete environment
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ INSTALL_DIR="./infra"
 ROOTFS_DIR="${INSTALL_DIR}/rootfs-build"
 ROOTFS_IMAGE="${INSTALL_DIR}/rootfs.ext4"
 
-echo "==> Building rootfs for Ubuntu ${UBUNTU_RELEASE}"
+echo "==> Building rootfs for Ubuntu ${UBUNTU_RELEASE} (full variant)"
 
 # Check for required tools
 if ! command -v debootstrap &> /dev/null; then
@@ -31,19 +31,25 @@ echo "==> Creating rootfs directory"
 sudo rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"
 
-# Run debootstrap
+# Run debootstrap with full variant (not minbase) and common packages
+# Note: python3-pip, python3-venv, nodejs, npm, tree are in universe, installed later
 echo "==> Running debootstrap (this may take a few minutes)..."
 sudo debootstrap \
-    --variant=minbase \
     --arch=amd64 \
-    --include=systemd,systemd-sysv,systemd-resolved,udev,dbus,ca-certificates,iproute2,iputils-ping,curl,python3 \
+    --include=systemd,systemd-sysv,systemd-resolved,udev,dbus,\
+ca-certificates,iproute2,iputils-ping,curl,wget,\
+bash,bash-completion,coreutils,findutils,grep,sed,gawk,\
+python3,git,vim-tiny,nano,less,file,\
+build-essential,make,gcc,g++,\
+openssh-client,rsync,tar,gzip,unzip,\
+locales,sudo \
     "$UBUNTU_RELEASE" \
     "$ROOTFS_DIR" \
     http://archive.ubuntu.com/ubuntu/
 
 echo "✓ Base system installed"
 
-# Configure apt sources with universe repository for pip/venv
+# Configure apt sources with universe repository
 echo "==> Configuring apt sources"
 sudo tee "${ROOTFS_DIR}/etc/apt/sources.list" > /dev/null <<EOF
 deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_RELEASE} main universe
@@ -51,25 +57,26 @@ deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_RELEASE}-updates main universe
 deb http://archive.ubuntu.com/ubuntu/ ${UBUNTU_RELEASE}-security main universe
 EOF
 
-# Install additional packages via chroot (with proper mounts)
-echo "==> Installing Python and Node.js packages"
-
-# Mount necessary filesystems for chroot
+# Install packages from universe repository via chroot
+echo "==> Installing additional packages from universe..."
 sudo mount --bind /proc "${ROOTFS_DIR}/proc"
 sudo mount --bind /sys "${ROOTFS_DIR}/sys"
 sudo mount --bind /dev "${ROOTFS_DIR}/dev"
 sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 
-# Run apt-get in chroot
-sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm && apt-get clean && rm -rf /var/lib/apt/lists/*"
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm tree && apt-get clean"
 
-# Unmount in reverse order
 sudo umount "${ROOTFS_DIR}/dev/pts" || true
 sudo umount "${ROOTFS_DIR}/dev" || true
 sudo umount "${ROOTFS_DIR}/sys" || true
 sudo umount "${ROOTFS_DIR}/proc" || true
 
-echo "✓ Python and Node.js packages installed"
+# Configure locale
+echo "==> Configuring locale"
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "locale-gen en_US.UTF-8"
+echo "LANG=en_US.UTF-8" | sudo tee "${ROOTFS_DIR}/etc/default/locale" > /dev/null
+
+echo "✓ Additional packages installed"
 
 # Configure the rootfs
 echo "==> Configuring rootfs"
@@ -77,7 +84,7 @@ echo "==> Configuring rootfs"
 # Set hostname
 echo "otus-vm" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
 
-# Configure /etc/hosts for localhost resolution
+# Configure /etc/hosts
 sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null <<EOF
 127.0.0.1   localhost
 127.0.1.1   otus-vm
@@ -87,7 +94,7 @@ EOF
 # Configure networking
 sudo mkdir -p "${ROOTFS_DIR}/etc/systemd/network"
 
-# Configure loopback interface (required for localhost)
+# Loopback interface
 sudo tee "${ROOTFS_DIR}/etc/systemd/network/10-loopback.network" > /dev/null <<EOF
 [Match]
 Name=lo
@@ -96,7 +103,7 @@ Name=lo
 Address=127.0.0.1/8
 EOF
 
-# Create link file to ensure eth0 is always brought up
+# eth0 link configuration
 sudo tee "${ROOTFS_DIR}/etc/systemd/network/10-eth0.link" > /dev/null <<EOF
 [Match]
 OriginalName=eth0
@@ -106,7 +113,7 @@ Name=eth0
 MACAddressPolicy=none
 EOF
 
-# Create network configuration with DHCP
+# eth0 network with DHCP
 sudo tee "${ROOTFS_DIR}/etc/systemd/network/20-eth0.network" > /dev/null <<EOF
 [Match]
 Name=eth0
@@ -140,48 +147,34 @@ sudo ln -sf /lib/systemd/system/systemd-networkd-wait-online.service \
 sudo ln -sf /lib/systemd/system/systemd-resolved.service \
     "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
 
-# Create static resolv.conf with DNS servers
+# Static resolv.conf
 sudo rm -f "${ROOTFS_DIR}/etc/resolv.conf"
 sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null <<EOF
-# Static DNS configuration
 nameserver 8.8.8.8
 nameserver 8.8.4.4
 options edns0 trust-ad
 EOF
 
-# Create network initialization script (fallback if systemd-networkd doesn't work)
+# Fallback network init script
 sudo tee "${ROOTFS_DIR}/usr/local/bin/init-network.sh" > /dev/null <<'SCRIPT'
 #!/bin/bash
-# Fallback network initialization for Firecracker VM
-# Waits for DHCP, falls back to static config if needed
-
 set -e
-
 IFACE="eth0"
 TIMEOUT=10
 GATEWAY="172.20.0.1"
 
-# Bring interface up
 ip link set "$IFACE" up 2>/dev/null || true
 
-# Wait for DHCP to assign an address
 for i in $(seq 1 $TIMEOUT); do
     if ip addr show "$IFACE" | grep -q "inet "; then
-        echo "Network configured via DHCP"
         exit 0
     fi
     sleep 1
 done
 
-# DHCP failed - check if we have a route
 if ! ip route | grep -q "default"; then
-    echo "DHCP timed out, configuring fallback network..."
-    
-    # Get assigned IP from MAC-based TAP pool mapping
-    # MAC format: 06:00:00:00:XX:YY where index = XX*256 + YY
     MAC=$(cat /sys/class/net/$IFACE/address 2>/dev/null || echo "")
     if [[ -n "$MAC" ]]; then
-        # Parse the last two octets to get the TAP index
         LAST_OCTETS=$(echo "$MAC" | cut -d: -f5,6 | tr ':' ' ')
         HIGH=$(echo "$LAST_OCTETS" | awk '{print $1}')
         LOW=$(echo "$LAST_OCTETS" | awk '{print $2}')
@@ -190,17 +183,13 @@ if ! ip route | grep -q "default"; then
     else
         GUEST_IP="172.20.0.2"
     fi
-    
-    # Configure static IP
     ip addr add "$GUEST_IP/24" dev "$IFACE" 2>/dev/null || true
     ip route add default via "$GATEWAY" 2>/dev/null || true
-    
-    echo "Fallback network configured: $GUEST_IP via $GATEWAY"
 fi
 SCRIPT
 sudo chmod +x "${ROOTFS_DIR}/usr/local/bin/init-network.sh"
 
-# Create systemd service for fallback network init
+# Systemd service for fallback network
 sudo tee "${ROOTFS_DIR}/etc/systemd/system/init-network.service" > /dev/null <<EOF
 [Unit]
 Description=Fallback Network Initialization
@@ -211,8 +200,6 @@ Wants=systemd-networkd.service
 Type=oneshot
 ExecStart=/usr/local/bin/init-network.sh
 RemainAfterExit=yes
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -221,13 +208,13 @@ EOF
 sudo ln -sf /etc/systemd/system/init-network.service \
     "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/init-network.service"
 
-# Install the Otus agent (Go binary with native VSock support)
+# Install the Otus agent
 echo "==> Installing Otus agent"
 sudo mkdir -p "${ROOTFS_DIR}/usr/local/bin"
 sudo cp ./dist/otus-agent "${ROOTFS_DIR}/usr/local/bin/otus-agent"
 sudo chmod +x "${ROOTFS_DIR}/usr/local/bin/otus-agent"
 
-# Create systemd service for the agent (no proxy needed - Go agent supports VSock directly)
+# Systemd service for agent
 sudo tee "${ROOTFS_DIR}/etc/systemd/system/otus-agent.service" > /dev/null <<EOF
 [Unit]
 Description=Otus Guest Agent
@@ -238,33 +225,25 @@ Type=simple
 ExecStart=/usr/local/bin/otus-agent
 Restart=always
 RestartSec=1
-StandardOutput=journal
-StandardError=journal
 WorkingDirectory=/workspace
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Enable agent service
 sudo ln -sf /etc/systemd/system/otus-agent.service \
     "${ROOTFS_DIR}/etc/systemd/system/multi-user.target.wants/otus-agent.service"
 
 # Create workspace directory
 sudo mkdir -p "${ROOTFS_DIR}/workspace"
 
-# Set root password (for debugging, not used normally)
-# chpasswd needs /etc to be writable (already is) but can work without special mounts
+# Set root password (for debugging)
 echo "root:otus" | sudo chroot "$ROOTFS_DIR" /usr/sbin/chpasswd
 
-# Clean up any stale mounts before creating the image
-echo "==> Ensuring clean filesystem state"
-for mp in "${ROOTFS_DIR}/dev/pts" "${ROOTFS_DIR}/dev" "${ROOTFS_DIR}/sys" "${ROOTFS_DIR}/proc" "${ROOTFS_DIR}/run"; do
-    sudo umount "$mp" 2>/dev/null || true
-done
-
-# Kill any processes that might still be using the rootfs
-sudo fuser -k "${ROOTFS_DIR}" 2>/dev/null || true
+# Clean up
+echo "==> Cleaning up build artifacts"
+sudo rm -rf "${ROOTFS_DIR}/var/cache/apt/archives"/*.deb
+sudo rm -rf "${ROOTFS_DIR}/var/lib/apt/lists"/*
 
 # Create the ext4 image
 echo "==> Creating ext4 filesystem image"
@@ -274,14 +253,13 @@ sudo mkfs.ext4 -d "$ROOTFS_DIR" -F "$ROOTFS_IMAGE"
 
 echo "✓ Rootfs image created at ${ROOTFS_IMAGE}"
 
-# Cleanup
+# Cleanup build directory
 echo "==> Cleaning up build directory"
 sudo rm -rf "$ROOTFS_DIR"
 
-# Show file info
 ls -lh "$ROOTFS_IMAGE"
 
 echo ""
 echo "==> Rootfs build complete!"
+echo "Included: bash, git, python3, nodejs, build-essential, common tools"
 echo "The guest agent will start automatically on boot"
-echo "Next step: Configure your VM with ./infra/vm-config.json"
