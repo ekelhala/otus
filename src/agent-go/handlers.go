@@ -41,9 +41,20 @@ func (s *Server) handleExecute(params *ExecuteParams) (*ExecuteResult, error) {
 		timeout = DefaultTimeout
 	}
 
+	// Decode command from base64 (all commands are base64-encoded)
+	if params.Command == "" {
+		return nil, fmt.Errorf("no command provided")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(params.Command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 command: %w", err)
+	}
+	command := string(decoded)
+
 	startTime := time.Now()
 
-	cmd := exec.Command("sh", "-c", params.Command)
+	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
 	for k, v := range params.Env {

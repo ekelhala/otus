@@ -36,6 +36,7 @@ type RPCError struct {
 }
 
 // ExecuteParams contains parameters for the execute method
+// Command is always base64-encoded to avoid multiline/escaping issues
 type ExecuteParams struct {
 	Command string            `json:"command"`
 	Cwd     string            `json:"cwd,omitempty"`
