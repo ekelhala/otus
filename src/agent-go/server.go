@@ -168,7 +168,18 @@ func (s *Server) handleVSockConnection(fd int) {
 
 		response := ctx.handleRPCRequest(&req)
 		respBytes, _ := json.Marshal(response)
-		conn.Write(append(respBytes, '\n'))
+		data := append(respBytes, '\n')
+
+		// Write all bytes (important for large responses like sync_from_guest)
+		written := 0
+		for written < len(data) {
+			n, err := conn.Write(data[written:])
+			if err != nil {
+				fmt.Printf("[Otus Agent] VSock write error: %v\n", err)
+				return
+			}
+			written += n
+		}
 	}
 }
 
@@ -184,7 +195,18 @@ func (s *Server) sendErrorRaw(w io.Writer, id interface{}, code int, message str
 		},
 	}
 	respBytes, _ := json.Marshal(resp)
-	w.Write(append(respBytes, '\n'))
+	respData := append(respBytes, '\n')
+
+	// Ensure all bytes are written
+	written := 0
+	for written < len(respData) {
+		n, err := w.Write(respData[written:])
+		if err != nil {
+			fmt.Printf("[Otus Agent] Error write failed: %v\n", err)
+			return
+		}
+		written += n
+	}
 }
 
 // startTCPListener creates and manages the TCP listener
@@ -253,7 +275,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		response := ctx.handleRPCRequest(&req)
 		respBytes, _ := json.Marshal(response)
-		conn.Write(append(respBytes, '\n'))
+		data := append(respBytes, '\n')
+
+		// Write all bytes (important for large responses like sync_from_guest)
+		written := 0
+		for written < len(data) {
+			n, err := conn.Write(data[written:])
+			if err != nil {
+				fmt.Printf("[Otus Agent] TCP write error: %v\n", err)
+				return
+			}
+			written += n
+		}
 	}
 }
 
@@ -269,7 +302,18 @@ func (s *Server) sendError(conn net.Conn, id interface{}, code int, message stri
 		},
 	}
 	respBytes, _ := json.Marshal(resp)
-	conn.Write(append(respBytes, '\n'))
+	respData := append(respBytes, '\n')
+
+	// Ensure all bytes are written
+	written := 0
+	for written < len(respData) {
+		n, err := conn.Write(respData[written:])
+		if err != nil {
+			fmt.Printf("[Otus Agent] Error write failed: %v\n", err)
+			return
+		}
+		written += n
+	}
 }
 
 // Uptime returns the server uptime in seconds
