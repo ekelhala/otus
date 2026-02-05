@@ -10,6 +10,18 @@ INSTALL_DIR="./infra"
 ROOTFS_DIR="${INSTALL_DIR}/rootfs-build"
 ROOTFS_IMAGE="${INSTALL_DIR}/rootfs.ext4"
 
+# Cleanup function to unmount filesystems
+cleanup() {
+    echo "==> Cleaning up mounts..."
+    sudo umount "${ROOTFS_DIR}/dev/pts" 2>/dev/null || true
+    sudo umount "${ROOTFS_DIR}/dev" 2>/dev/null || true
+    sudo umount "${ROOTFS_DIR}/sys" 2>/dev/null || true
+    sudo umount "${ROOTFS_DIR}/proc" 2>/dev/null || true
+}
+
+# Set trap to always cleanup on exit
+trap cleanup EXIT INT TERM
+
 echo "==> Building rootfs for Ubuntu ${UBUNTU_RELEASE} (full variant)"
 
 # Check for required tools
@@ -66,10 +78,7 @@ sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 
 sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm tree && apt-get clean"
 
-sudo umount "${ROOTFS_DIR}/dev/pts" || true
-sudo umount "${ROOTFS_DIR}/dev" || true
-sudo umount "${ROOTFS_DIR}/sys" || true
-sudo umount "${ROOTFS_DIR}/proc" || true
+# Unmounts will be handled by the cleanup trap
 
 # Configure locale
 echo "==> Configuring locale"
@@ -244,6 +253,10 @@ echo "root:otus" | sudo chroot "$ROOTFS_DIR" /usr/sbin/chpasswd
 echo "==> Cleaning up build artifacts"
 sudo rm -rf "${ROOTFS_DIR}/var/cache/apt/archives"/*.deb
 sudo rm -rf "${ROOTFS_DIR}/var/lib/apt/lists"/*
+
+# Unmount special filesystems before creating image
+echo "==> Unmounting special filesystems..."
+cleanup
 
 # Create the ext4 image
 echo "==> Creating ext4 filesystem image"
