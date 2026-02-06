@@ -18,6 +18,10 @@ export class Logger {
     this.verbose = verbose;
   }
 
+  isVerbose(): boolean {
+    return this.verbose;
+  }
+
   /**
    * Log debug information (only in verbose mode)
    */

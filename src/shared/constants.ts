@@ -4,6 +4,7 @@
 
 import { existsSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 
 /**
  * System Paths - where VM assets are installed system-wide
@@ -187,6 +188,16 @@ export const GLOBAL_CONFIG = {
   DIR: ".otus",
   /** Credentials file for API keys */
   CREDENTIALS_FILE: "credentials.json",
+} as const;
+
+/**
+ * Daemon Configuration
+ */
+export const DAEMON = {
+  /** Unix socket path for daemon communication */
+  SOCKET_PATH: join(homedir(), ".otus", "daemon.sock"),
+  /** PID file for daemon process */
+  PID_FILE: join(homedir(), ".otus", "daemon.pid"),
 } as const;
 
 /**
