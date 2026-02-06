@@ -175,7 +175,7 @@ export const EMBEDDINGS = {
  */
 export const LLM = {
   /** OpenRouter model identifier */
-  MODEL: "google/gemini-2.5-flash",
+  MODEL: "google/gemini-3-flash-preview",
   /** Maximum tokens for completion */
   MAX_TOKENS: 4096,
   /** Number of RAG results to include in context */
