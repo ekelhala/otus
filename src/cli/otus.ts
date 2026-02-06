@@ -104,39 +104,65 @@ async function isDaemonRunning(): Promise<boolean> {
 function getToolCallDescription(name: string, input: any): string {
   switch (name) {
     case "start_sandbox":
-      const sandboxName = input?.name ? ` (${input.name})` : "";
-      return `Starting sandbox environment${sandboxName}`;
+      const sandboxName = input?.name ? ` ${chalk.dim(`(${input.name})`)}` : "";
+      return `Booting up sandbox VM${sandboxName}`;
     
     case "stop_sandbox":
-      const sandboxId = input?.sandbox_id ? ` ${input.sandbox_id}` : "";
-      return `Stopping sandbox${sandboxId}`;
+      const sandboxId = input?.sandbox_id ? ` ${chalk.dim(input.sandbox_id)}` : "";
+      return `Shutting down sandbox${sandboxId}`;
     
     case "list_sandboxes":
-      return "Listing active sandboxes";
+      return "Checking active sandboxes";
     
     case "sync_workspace":
       if (input?.direction === "to_sandbox") {
         return "Syncing workspace files to sandbox";
       } else if (input?.direction === "from_sandbox") {
-        return "Syncing changes from sandbox to host";
+        return "Syncing changes back from sandbox";
       }
-      return "Syncing workspace";
+      return "Syncing workspace files";
     
-    case "run_cmd":
+    case "start_terminal":
+      const termName = input?.name ? ` ${chalk.dim(`(${input.name})`)}` : "";
+      return `Opening terminal session${termName}`;
+    
+    case "send_to_terminal":
       const cmd = input?.command || "";
       // Truncate very long commands
       const displayCmd = cmd.length > 60 ? cmd.substring(0, 57) + "..." : cmd;
-      return `Running command: ${chalk.cyan(displayCmd)}`;
+      return `Typing to terminal: ${chalk.bold.cyan(displayCmd)}`;
+    
+    case "read_terminal":
+      const readTermName = input?.name ? ` ${chalk.dim(input.name)}` : "";
+      return `Reading terminal output${readTermName}`;
+    
+    case "list_terminals":
+      return "Checking terminal sessions";
+    
+    case "kill_terminal":
+      const killTermName = input?.name ? ` ${chalk.dim(input.name)}` : "";
+      return `Closing terminal${killTermName}`;
     
     case "search_code":
       const query = input?.query || "";
-      return `Searching code for: ${chalk.cyan(query)}`;
+      const shortQuery = query.length > 50 ? query.substring(0, 47) + "..." : query;
+      return `Searching code for: ${chalk.cyan(shortQuery)}`;
+    
+    case "wait":
+    case "sleep":
+      const duration = input?.duration || input?.seconds || "";
+      const reason = input?.reason || "";
+      if (reason) {
+        return `Waiting ${duration}s: ${chalk.italic(reason)}`;
+      }
+      return `Waiting ${duration}s`;
     
     case "task_complete":
-      return "Task complete";
+      return chalk.green("✓ Task complete");
     
     default:
-      return `${name}`;
+      // Fallback: convert snake_case to readable format
+      return name.replace(/_/g, " ");
   }
 }
 
@@ -149,29 +175,39 @@ function renderEvent(event: InferenceEvent, logger: Logger): void {
       logger.debug(`Iteration ${event.current}/${event.max}`);
       break;
     case "thinking":
-      console.log(chalk.gray(event.text));
+      console.log(chalk.blue("Otus:"), chalk.gray(event.text));
       break;
     case "tool_call":
       const description = getToolCallDescription(event.name, event.input);
-      console.log(chalk.blue("→"), description);
+      console.log(chalk.blue("Otus →"), description);
       if (logger.isVerbose() && event.input) {
         logger.debug(`  Input: ${JSON.stringify(event.input)}`);
       }
       break;
     case "tool_result":
       if (event.isError) {
-        logger.error(`  Error: ${event.result}`);
+        console.log(chalk.red("  ✗"), chalk.red(event.result));
       } else if (logger.isVerbose()) {
         logger.debug(`  Result: ${JSON.stringify(event.result)}`);
+      } else if (event.name === "run_cmd" && event.result) {
+        // Show command output preview for run_cmd
+        const resultStr = typeof event.result === 'string' ? event.result : JSON.stringify(event.result);
+        const lines = resultStr.split('\n').slice(0, 3); // Show first 3 lines
+        if (lines.length > 0 && lines[0]) {
+          console.log(chalk.gray(`  ${lines[0]}`));
+          if (lines.length > 1 && resultStr.split('\n').length > 3) {
+            console.log(chalk.gray(`  ... (${resultStr.split('\n').length} lines total)`));
+          }
+        }
       }
       break;
     case "complete":
       if (event.summary) {
-        logger.success(event.summary);
+        console.log(chalk.green("Otus:"), event.summary);
       }
       break;
     case "error":
-      logger.error(event.message);
+      console.log(chalk.red("Otus:"), chalk.red(event.message));
       break;
   }
 }

@@ -14,7 +14,7 @@ import type {
 import { tools } from "./tools.ts";
 import type { ToolName } from "./tools.ts";
 import { ToolHandlers } from "./tool-handlers.ts";
-import { buildInitialPrompt, ACTION_PROMPT } from "./prompts.ts";
+import { buildInitialPrompt, ACTION_PROMPT, SYSTEM_PROMPT } from "./prompts.ts";
 
 /**
  * Inference Engine implementing the ReAct loop
@@ -243,15 +243,43 @@ export class InferenceEngine {
       {
         model: LLM.MODEL,
         max_tokens: LLM.MAX_TOKENS,
+        system: [
+          {
+            type: "text",
+            text: SYSTEM_PROMPT,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
         messages: this.messages,
-        tools,
+        tools: tools.map((tool, index) => ({
+          ...tool,
+          // Cache the last tool in the list (contains all tool definitions)
+          ...(index === tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {}),
+        })),
       },
       {
         timeout: EXECUTION.API_TIMEOUT_MS,
       }
     );
     
-    this.logger.debug(`Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}`);
+    // Log cache usage if available
+    if (response.usage) {
+      const cacheInfo = [];
+      if (response.usage.cache_creation_input_tokens) {
+        cacheInfo.push(`cache_write=${response.usage.cache_creation_input_tokens}`);
+      }
+      if (response.usage.cache_read_input_tokens) {
+        cacheInfo.push(`cache_read=${response.usage.cache_read_input_tokens}`);
+      }
+      const cacheStr = cacheInfo.length > 0 ? `, ${cacheInfo.join(", ")}` : "";
+      this.logger.debug(
+        `Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}, ` +
+        `input_tokens=${response.usage.input_tokens}, output_tokens=${response.usage.output_tokens}${cacheStr}`
+      );
+    } else {
+      this.logger.debug(`Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}`);
+    }
+    
     return response;
   }
 

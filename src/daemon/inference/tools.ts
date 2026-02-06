@@ -17,6 +17,7 @@ export type ToolName =
   | "read_terminal"
   | "list_terminals"
   | "kill_terminal"
+  | "wait"
   | "search_code"
   | "task_complete";
 
@@ -195,6 +196,25 @@ export const tools: Anthropic.Tool[] = [
         },
       },
       required: ["name"],
+    },
+  },
+  {
+    name: "wait",
+    description:
+      "Wait for a specified duration. Use this to give processes time to complete (installations, server startup, builds, etc.) instead of immediately checking results. Shows the user what you're waiting for.",
+    input_schema: {
+      type: "object",
+      properties: {
+        duration: {
+          type: "number",
+          description: "How many seconds to wait (e.g., 5 for installs, 10 for server startup)",
+        },
+        reason: {
+          type: "string",
+          description: "What you're waiting for (shown to user, e.g., 'npm install to complete', 'server to start')",
+        },
+      },
+      required: ["duration", "reason"],
     },
   },
   {

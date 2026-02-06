@@ -68,6 +68,9 @@ export class ToolHandlers {
       case "kill_terminal":
         return await this.killTerminal(input as KillTerminalInput);
 
+      case "wait":
+        return await this.wait(input as WaitInput);
+
       case "search_code":
         return await this.searchCode(input as SearchCodeInput);
 
@@ -276,6 +279,17 @@ ${result.content}
   }
 
   /**
+   * Wait for a specified duration
+   */
+  private async wait(input: WaitInput): Promise<string> {
+    this.logger.toolResult("wait", `Waiting ${input.duration}s: ${input.reason}`);
+    
+    await new Promise((resolve) => setTimeout(resolve, input.duration * 1000));
+    
+    return `Waited ${input.duration} seconds for: ${input.reason}`;
+  }
+
+  /**
    * Helper to get sandbox by ID or active sandbox
    */
   private getSandbox(sandboxId?: string) {
@@ -344,4 +358,9 @@ interface ListTerminalsInput {
 interface KillTerminalInput {
   name: string;
   sandbox_id?: string;
+}
+
+interface WaitInput {
+  duration: number;
+  reason: string;
 }
