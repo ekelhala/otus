@@ -10,6 +10,7 @@ import { tmpdir } from "os";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { GuestAgentClient } from "./vsock.ts";
 import { VSOCK, resolveVMAssets, getVMAssetInstructions, SYSTEM_PATHS } from "../shared/constants.ts";
+import { vmPool } from "./vm-pool.ts";
 
 /**
  * Sandbox instance representing a single VM
@@ -101,9 +102,39 @@ export class SandboxManager {
   }
 
   /**
-   * Start a new sandbox VM
+   * Start a new sandbox VM (uses pool VM if available)
    */
   async startSandbox(name?: string): Promise<Sandbox> {
+    // Try to get a pre-warmed VM from the pool
+    const poolVM = vmPool.getVM();
+    
+    if (poolVM) {
+      console.log(`[Sandbox] Using pre-warmed VM ${poolVM.id}${name ? ` for ${name}` : ""}`);
+      
+      const sandbox: Sandbox = {
+        id: poolVM.id,
+        name,
+        vm: poolVM.vm,
+        agentClient: poolVM.agentClient,
+        createdAt: poolVM.createdAt,
+        sockets: poolVM.sockets,
+        workspaceSynced: false,
+        guestIp: poolVM.guestIp,
+      };
+
+      this.sandboxes.set(sandbox.id, sandbox);
+
+      // Set as active if it's the first sandbox
+      if (!this.activeSandboxId) {
+        this.activeSandboxId = sandbox.id;
+      }
+
+      console.log(`[Sandbox] ✓ Sandbox ${sandbox.id} ready (IP: ${sandbox.guestIp}) - from pool`);
+      return sandbox;
+    }
+
+    // No pool VM available, create a new one
+    console.log(`[Sandbox] No pool VM available, creating new VM...`);
     const id = `sandbox-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
     const cid = this.nextCid++;
 
