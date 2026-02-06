@@ -76,7 +76,11 @@ sudo mount --bind /sys "${ROOTFS_DIR}/sys"
 sudo mount --bind /dev "${ROOTFS_DIR}/dev"
 sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 
-sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm tree tmux && apt-get clean"
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv tree tmux && apt-get clean"
+
+# Install Node.js from NodeSource (LTS version)
+echo "==> Installing Node.js from NodeSource..."
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs && apt-get clean"
 
 # Unmounts will be handled by the cleanup trap
 
