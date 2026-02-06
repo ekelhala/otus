@@ -53,20 +53,20 @@ export class ToolHandlers {
       case "sync_workspace":
         return await this.syncWorkspace(input as SyncWorkspaceInput);
 
-      case "start_session":
-        return await this.startSession(input as StartSessionInput);
+      case "start_terminal":
+        return await this.startTerminal(input as StartTerminalInput);
 
-      case "send_to_session":
-        return await this.sendToSession(input as SendToSessionInput);
+      case "send_to_terminal":
+        return await this.sendToTerminal(input as SendToTerminalInput);
 
-      case "read_session":
-        return await this.readSession(input as ReadSessionInput);
+      case "read_terminal":
+        return await this.readTerminal(input as ReadTerminalInput);
 
-      case "list_sessions":
-        return await this.listSessions(input as ListSessionsInput);
+      case "list_terminals":
+        return await this.listTerminals(input as ListTerminalsInput);
 
-      case "kill_session":
-        return await this.killSession(input as KillSessionInput);
+      case "kill_terminal":
+        return await this.killTerminal(input as KillTerminalInput);
 
       case "search_code":
         return await this.searchCode(input as SearchCodeInput);
@@ -194,85 +194,85 @@ ${result.content}
     return "Task marked as complete";
   }
 
-  // ========== Session handlers ==========
+  // ========== Terminal handlers ==========
 
   /**
-   * Start a tmux session in the sandbox
+   * Start a terminal session in the sandbox
    */
-  private async startSession(input: StartSessionInput): Promise<string> {
+  private async startTerminal(input: StartTerminalInput): Promise<string> {
     const sandbox = this.getSandbox(input.sandbox_id);
     const result = await sandbox.agentClient.startSession(input.name);
 
     if (!result.success) {
-      return `Failed to start session: ${result.error}`;
+      return `Failed to start terminal: ${result.error}`;
     }
 
-    this.logger.toolResult("start_session", `Started session: ${input.name}`);
-    return `Session '${input.name}' started successfully.\nUse send_to_session to run commands in this session.`;
+    this.logger.toolResult("start_terminal", `Started terminal: ${input.name}`);
+    return `Terminal '${input.name}' started successfully.\nUse send_to_terminal to run commands in this terminal.`;
   }
 
   /**
-   * Send a command to a tmux session
+   * Send a command to a terminal session
    */
-  private async sendToSession(input: SendToSessionInput): Promise<string> {
+  private async sendToTerminal(input: SendToTerminalInput): Promise<string> {
     const sandbox = this.getSandbox(input.sandbox_id);
     const result = await sandbox.agentClient.sendToSession(input.name, input.command);
 
     if (!result.success) {
-      return `Failed to send to session: ${result.error}`;
+      return `Failed to send to terminal: ${result.error}`;
     }
 
-    this.logger.toolResult("send_to_session", `Sent to ${input.name}: ${input.command.substring(0, 50)}...`);
-    return `Command sent to session '${input.name}'.\nUse read_session to check output.`;
+    this.logger.toolResult("send_to_terminal", `Sent to ${input.name}: ${input.command.substring(0, 50)}...`);
+    return `Command sent to terminal '${input.name}'.\nUse read_terminal to check output.`;
   }
 
   /**
-   * Read output from a tmux session
+   * Read output from a terminal session
    */
-  private async readSession(input: ReadSessionInput): Promise<string> {
+  private async readTerminal(input: ReadTerminalInput): Promise<string> {
     const sandbox = this.getSandbox(input.sandbox_id);
     const result = await sandbox.agentClient.readSession(input.name, input.lines);
 
     if (!result.success) {
-      return `Failed to read session: ${result.error}`;
+      return `Failed to read terminal: ${result.error}`;
     }
 
     const preview = result.output.substring(0, 200);
-    this.logger.toolResult("read_session", `${preview}${result.output.length > 200 ? "..." : ""}`);
+    this.logger.toolResult("read_terminal", `${preview}${result.output.length > 200 ? "..." : ""}`);
     return result.output || "[no output]";
   }
 
   /**
-   * List active tmux sessions
+   * List active terminal sessions
    */
-  private async listSessions(input: ListSessionsInput): Promise<string> {
+  private async listTerminals(input: ListTerminalsInput): Promise<string> {
     const sandbox = this.getSandbox(input.sandbox_id);
     const result = await sandbox.agentClient.listSessions();
 
     if (result.sessions.length === 0) {
-      return "No active sessions. Use start_session to create one.";
+      return "No active terminals. Use start_terminal to create one.";
     }
 
     const lines = result.sessions.map((s) => 
       `- ${s.name} (${s.windows} window${s.windows !== 1 ? "s" : ""})`
     );
 
-    return `Active sessions:\n${lines.join("\n")}`;
+    return `Active terminals:\n${lines.join("\n")}`;
   }
 
   /**
-   * Kill a tmux session
+   * Kill a terminal session
    */
-  private async killSession(input: KillSessionInput): Promise<string> {
+  private async killTerminal(input: KillTerminalInput): Promise<string> {
     const sandbox = this.getSandbox(input.sandbox_id);
     const result = await sandbox.agentClient.killSession(input.name);
 
     if (!result.success) {
-      return `Failed to kill session: ${result.error}`;
+      return `Failed to kill terminal: ${result.error}`;
     }
 
-    this.logger.toolResult("kill_session", `Killed session: ${input.name}`);
-    return `Session '${input.name}' terminated.`;
+    this.logger.toolResult("kill_terminal", `Killed terminal: ${input.name}`);
+    return `Terminal '${input.name}' terminated.`;
   }
 
   /**
@@ -320,28 +320,28 @@ interface TaskCompleteInput {
   lessons?: string[];
 }
 
-interface StartSessionInput {
+interface StartTerminalInput {
   name: string;
   sandbox_id?: string;
 }
 
-interface SendToSessionInput {
+interface SendToTerminalInput {
   name: string;
   command: string;
   sandbox_id?: string;
 }
 
-interface ReadSessionInput {
+interface ReadTerminalInput {
   name: string;
   lines?: number;
   sandbox_id?: string;
 }
 
-interface ListSessionsInput {
+interface ListTerminalsInput {
   sandbox_id?: string;
 }
 
-interface KillSessionInput {
+interface KillTerminalInput {
   name: string;
   sandbox_id?: string;
 }

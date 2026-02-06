@@ -12,11 +12,11 @@ export type ToolName =
   | "stop_sandbox"
   | "list_sandboxes"
   | "sync_workspace"
-  | "start_session"
-  | "send_to_session"
-  | "read_session"
-  | "list_sessions"
-  | "kill_session"
+  | "start_terminal"
+  | "send_to_terminal"
+  | "read_terminal"
+  | "list_terminals"
+  | "kill_terminal"
   | "search_code"
   | "task_complete";
 
@@ -99,15 +99,15 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "start_session",
+    name: "start_terminal",
     description:
-      "Start a persistent tmux session for running long-lived processes (servers, watch modes, etc.). Sessions persist across tool calls and can capture output. Use this instead of backgrounding commands with &.",
+      "Start a new persistent terminal session in the sandbox. Use this to run long-running processes, interactive commands, or servers. Each terminal persists until explicitly killed.",
     input_schema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Unique name for the session (e.g., 'dev-server', 'tests')",
+          description: "Unique name for this terminal (e.g., 'server', 'build', 'tests')",
         },
         sandbox_id: {
           type: "string",
@@ -118,19 +118,19 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "send_to_session",
+    name: "send_to_terminal",
     description:
-      "Send a command to an existing tmux session. The command runs in the session's persistent shell. Great for starting servers, running watch modes, or any long-running process.",
+      "Send a command to an existing terminal session. The command executes in that terminal's shell context. Great for starting servers, running builds, or any long-running process.",
     input_schema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Name of the session to send to",
+          description: "Name of the terminal to send the command to",
         },
         command: {
           type: "string",
-          description: "The command to send to the session",
+          description: "The command to execute in the terminal",
         },
         sandbox_id: {
           type: "string",
@@ -141,15 +141,15 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "read_session",
+    name: "read_terminal",
     description:
-      "Read the current output from a tmux session. Use this to check on the status of a running process, see server logs, or check for errors.",
+      "Read the current output/history from a terminal session. Shows what's currently visible in the terminal. Use this to check command results, see server logs, or check for errors.",
     input_schema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Name of the session to read from",
+          description: "Name of the terminal to read from",
         },
         lines: {
           type: "number",
@@ -164,9 +164,9 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "list_sessions",
+    name: "list_terminals",
     description:
-      "List all active tmux sessions in a sandbox. Shows session names, creation time, and number of windows.",
+      "List all active terminal sessions in the sandbox. Shows terminal names and status.",
     input_schema: {
       type: "object",
       properties: {
@@ -179,15 +179,15 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "kill_session",
+    name: "kill_terminal",
     description:
-      "Terminate a tmux session and its running processes. Use this to stop servers or clean up background processes when done.",
+      "Terminate a terminal session and all processes running in it. Use this to stop servers or clean up background processes when done.",
     input_schema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Name of the session to kill",
+          description: "Name of the terminal to kill",
         },
         sandbox_id: {
           type: "string",
