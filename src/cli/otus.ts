@@ -7,10 +7,13 @@
 import { Command } from "commander";
 import { resolve } from "path";
 import { existsSync } from "fs";
+import { spawn } from "child_process";
+import { readFile } from "fs/promises";
 import prompts from "prompts";
 import chalk from "chalk";
-import { WORKSPACE, CREDENTIAL_KEYS, type CredentialKey } from "@shared/constants.ts";
-import { OtusDaemon } from "@daemon/index.ts";
+import { WORKSPACE, CREDENTIAL_KEYS, DAEMON, type CredentialKey } from "@shared/constants.ts";
+import { DaemonClient } from "./client.ts";
+import type { InferenceEvent } from "@daemon/inference.ts";
 import { 
   readCredentials, 
   setCredential, 
@@ -82,10 +85,222 @@ function isInitialized(workspacePath: string): boolean {
   return existsSync(otusPath);
 }
 
+/**
+ * Check if daemon is running
+ */
+async function isDaemonRunning(): Promise<boolean> {
+  try {
+    const client = new DaemonClient();
+    await client.health();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get a user-friendly description for a tool call
+ */
+function getToolCallDescription(name: string, input: any): string {
+  switch (name) {
+    case "start_sandbox":
+      const sandboxName = input?.name ? ` (${input.name})` : "";
+      return `Starting sandbox environment${sandboxName}`;
+    
+    case "stop_sandbox":
+      const sandboxId = input?.sandbox_id ? ` ${input.sandbox_id}` : "";
+      return `Stopping sandbox${sandboxId}`;
+    
+    case "list_sandboxes":
+      return "Listing active sandboxes";
+    
+    case "sync_workspace":
+      if (input?.direction === "to_sandbox") {
+        return "Syncing workspace files to sandbox";
+      } else if (input?.direction === "from_sandbox") {
+        return "Syncing changes from sandbox to host";
+      }
+      return "Syncing workspace";
+    
+    case "run_cmd":
+      const cmd = input?.command || "";
+      // Truncate very long commands
+      const displayCmd = cmd.length > 60 ? cmd.substring(0, 57) + "..." : cmd;
+      return `Running command: ${chalk.cyan(displayCmd)}`;
+    
+    case "search_code":
+      const query = input?.query || "";
+      return `Searching code for: ${chalk.cyan(query)}`;
+    
+    case "task_complete":
+      return "Task complete";
+    
+    default:
+      return `${name}`;
+  }
+}
+
+/**
+ * Render inference events to the console
+ */
+function renderEvent(event: InferenceEvent, logger: Logger): void {
+  switch (event.type) {
+    case "iteration":
+      logger.debug(`Iteration ${event.current}/${event.max}`);
+      break;
+    case "thinking":
+      console.log(chalk.gray(event.text));
+      break;
+    case "tool_call":
+      const description = getToolCallDescription(event.name, event.input);
+      console.log(chalk.blue("→"), description);
+      if (logger.isVerbose() && event.input) {
+        logger.debug(`  Input: ${JSON.stringify(event.input)}`);
+      }
+      break;
+    case "tool_result":
+      if (event.isError) {
+        logger.error(`  Error: ${event.result}`);
+      } else if (logger.isVerbose()) {
+        logger.debug(`  Result: ${JSON.stringify(event.result)}`);
+      }
+      break;
+    case "complete":
+      if (event.summary) {
+        logger.success(event.summary);
+      }
+      break;
+    case "error":
+      logger.error(event.message);
+      break;
+  }
+}
+
 program
   .name("otus")
   .description("Otus - An autonomous, local-first system engineering agent")
   .version("0.1.0");
+
+/**
+ * otus daemon
+ */
+const daemonCmd = program
+  .command("daemon")
+  .description("Manage the Otus daemon");
+
+/**
+ * otus daemon start
+ */
+daemonCmd
+  .command("start")
+  .description("Start the Otus daemon")
+  .action(async () => {
+    const logger = initLogger(false);
+
+    // Check if already running
+    if (await isDaemonRunning()) {
+      logger.success("Daemon is already running");
+      return;
+    }
+
+    logger.info("Starting Otus daemon...");
+
+    // Get the path to the daemon entry point
+    const daemonPath = new URL("../daemon/main.ts", import.meta.url).pathname;
+
+    // Spawn daemon process in background
+    const daemon = spawn("bun", ["run", daemonPath], {
+      detached: true,
+      stdio: "ignore",
+    });
+
+    daemon.unref();
+
+    // Wait for daemon to start
+    let retries = 10;
+    while (retries > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      
+      if (await isDaemonRunning()) {
+        // Read PID
+        try {
+          const pid = await readFile(DAEMON.PID_FILE, "utf-8");
+          logger.success(`Daemon started (PID: ${pid.trim()})`);
+        } catch {
+          logger.success("Daemon started");
+        }
+        return;
+      }
+      
+      retries--;
+    }
+
+    logger.error("Daemon failed to start within 5 seconds");
+    process.exit(1);
+  });
+
+/**
+ * otus daemon stop
+ */
+daemonCmd
+  .command("stop")
+  .description("Stop the Otus daemon")
+  .action(async () => {
+    const logger = initLogger(false);
+
+    if (!(await isDaemonRunning())) {
+      logger.warn("Daemon is not running");
+      return;
+    }
+
+    logger.info("Stopping daemon...");
+
+    try {
+      const client = new DaemonClient();
+      await client.shutdownDaemon();
+      logger.success("Daemon stopped");
+    } catch (error) {
+      logger.error(`Failed to stop daemon: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * otus daemon status
+ */
+daemonCmd
+  .command("status")
+  .description("Check daemon status")
+  .action(async () => {
+    const logger = initLogger(false);
+
+    if (await isDaemonRunning()) {
+      logger.success("Daemon is running");
+      console.log(chalk.gray(`Socket: ${DAEMON.SOCKET_PATH}`));
+      
+      // Try to read PID
+      try {
+        const pid = await readFile(DAEMON.PID_FILE, "utf-8");
+        console.log(chalk.gray(`PID: ${pid.trim()}`));
+      } catch {
+        // PID file doesn't exist
+      }
+
+      // Get VM pool stats
+      try {
+        const client = new DaemonClient();
+        const health = await client.health();
+        if (health.vmPool) {
+          console.log(chalk.gray(`VM Pool: ${health.vmPool.available}/${health.vmPool.target} ready`));
+        }
+      } catch {
+        // Ignore if we can't get stats
+      }
+    } else {
+      logger.warn("Daemon is not running");
+      console.log(chalk.gray('Run "otus daemon start" to start it'));
+    }
+  });
 
 /**
  * otus init
@@ -106,19 +321,21 @@ program
       return;
     }
 
-    const apiKeys = getApiKeys(workspacePath);
+    // Check if daemon is running
+    if (!(await isDaemonRunning())) {
+      logger.error("Daemon is not running");
+      console.error('Run "otus daemon start" first');
+      process.exit(1);
+    }
 
-    const daemon = new OtusDaemon({
-      workspacePath,
-      ...apiKeys,
-      verbose: options.verbose,
-    });
+    const apiKeys = getApiKeys(workspacePath);
+    const client = new DaemonClient();
 
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
         logger.startSpinner("Checking prerequisites...");
-        const check = await daemon.checkPrerequisites();
+        const check = await client.checkPrerequisites(workspacePath);
         
         if (!check.ok) {
           logger.failSpinner("Missing prerequisites");
@@ -133,7 +350,11 @@ program
       }
 
       logger.startSpinner("Initializing workspace...");
-      await daemon.init();
+      await client.init({
+        workspacePath,
+        ...apiKeys,
+        verbose: options.verbose,
+      });
       logger.succeedSpinner("Otus initialized successfully!");
       
       console.log("\nNext steps:");
@@ -166,33 +387,21 @@ program
       process.exit(1);
     }
 
+    // Check if daemon is running
+    if (!(await isDaemonRunning())) {
+      logger.error("Daemon is not running");
+      console.error('Run "otus daemon start" first');
+      process.exit(1);
+    }
+
     const apiKeys = getApiKeys(workspacePath);
-
-    const daemon = new OtusDaemon({
-      workspacePath,
-      ...apiKeys,
-      verbose: options.verbose,
-    });
-
-    // Handle graceful shutdown
-    let shuttingDown = false;
-    const shutdown = async () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      
-      console.log("\n\nReceived interrupt signal, shutting down...");
-      await daemon.shutdown();
-      process.exit(0);
-    };
-
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    const client = new DaemonClient();
 
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
         logger.startSpinner("Checking prerequisites...");
-        const check = await daemon.checkPrerequisites();
+        const check = await client.checkPrerequisites(workspacePath);
         
         if (!check.ok) {
           logger.failSpinner("Missing prerequisites");
@@ -205,13 +414,20 @@ program
         logger.succeedSpinner("Prerequisites OK");
       }
 
-      // Initialize
+      // Initialize workspace in daemon
       logger.startSpinner("Initializing...");
-      await daemon.init();
+      await client.init({
+        workspacePath,
+        ...apiKeys,
+        verbose: options.verbose,
+      });
       logger.succeedSpinner("Ready");
 
       // Start chat session
-      const session = daemon.startChat();
+      logger.startSpinner("Creating session...");
+      const sessionId = await client.createSession({ workspacePath });
+      logger.succeedSpinner("Session created");
+
       console.log("\n" + chalk.cyan("═".repeat(60)));
       console.log(chalk.bold.cyan("Otus Interactive Session"));
       console.log(chalk.gray("Type your requests. Press Ctrl+C to exit."));
@@ -232,6 +448,25 @@ program
         });
       };
 
+      // Handle graceful shutdown
+      let shuttingDown = false;
+      const shutdown = async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        
+        console.log("\n\nExiting...");
+        rl.close();
+        try {
+          await client.endSession(sessionId);
+        } catch {
+          // Ignore errors during cleanup
+        }
+        process.exit(0);
+      };
+
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+
       while (true) {
         try {
           const userInput = await askQuestion("\n> ");
@@ -243,6 +478,7 @@ program
           // Special commands
           if (userInput.toLowerCase() === "/quit" || userInput.toLowerCase() === "/exit") {
             console.log("\nGoodbye!");
+            await client.endSession(sessionId);
             break;
           }
 
@@ -256,12 +492,8 @@ program
 
           // Process with agent
           console.log("");
-          logger.startSpinner("Processing...");
-          const result = await session.chat(userInput);
-          logger.stopSpinner();
-          
-          if (result.summary) {
-            logger.success(result.summary);
+          for await (const event of client.sendMessage(sessionId, userInput)) {
+            renderEvent(event, logger);
           }
         } catch (error) {
           if ((error as any).code === "ERR_USE_AFTER_CLOSE") {
@@ -272,11 +504,9 @@ program
       }
 
       rl.close();
-      await daemon.shutdown();
       process.exit(0);
     } catch (error) {
       console.error("\n✗ Fatal error:", error);
-      await daemon.shutdown();
       process.exit(1);
     }
   });
@@ -302,33 +532,21 @@ program
       process.exit(1);
     }
 
+    // Check if daemon is running
+    if (!(await isDaemonRunning())) {
+      logger.error("Daemon is not running");
+      console.error('Run "otus daemon start" first');
+      process.exit(1);
+    }
+
     const apiKeys = getApiKeys(workspacePath);
-
-    const daemon = new OtusDaemon({
-      workspacePath,
-      ...apiKeys,
-      verbose: options.verbose,
-    });
-
-    // Handle graceful shutdown
-    let shuttingDown = false;
-    const shutdown = async () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      
-      console.log("\n\nReceived interrupt signal, shutting down...");
-      await daemon.shutdown();
-      process.exit(0);
-    };
-
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    const client = new DaemonClient();
 
     try {
       // Check prerequisites (unless skipped)
       if (!options.skipChecks) {
         logger.startSpinner("Checking prerequisites...");
-        const check = await daemon.checkPrerequisites();
+        const check = await client.checkPrerequisites(workspacePath);
         
         if (!check.ok) {
           logger.failSpinner("Missing prerequisites");
@@ -344,32 +562,42 @@ program
         }
         logger.succeedSpinner("Prerequisites OK");
       }
-      // Initialize (loads existing indexes)
-      logger.startSpinner("Initializing...");
-      await daemon.init();
-      logger.succeedSpinner("Ready");
 
       // Execute task
       logger.info(`\nGoal: ${chalk.bold(goal)}\n`);
-      logger.startSpinner("Working on task...");
-      const result = await daemon.do(goal);
-      logger.stopSpinner();
+      const startTime = Date.now();
+      let completed = false;
+      let summary: string | undefined;
+
+      for await (const event of client.runTask({
+        workspacePath,
+        goal,
+        ...apiKeys,
+        verbose: options.verbose,
+      })) {
+        renderEvent(event, logger);
+        
+        if (event.type === "complete") {
+          completed = true;
+          summary = event.summary;
+        }
+      }
+
+      const duration = Date.now() - startTime;
 
       // Display result
       console.log("\n" + chalk.cyan("═".repeat(60)));
-      if (result.status === "completed") {
+      if (completed) {
         logger.success("Task completed successfully");
       } else {
-        logger.error("Task failed");
+        logger.error("Task incomplete");
       }
-      logger.info(`Duration: ${(result.duration / 1000).toFixed(1)}s`);
+      logger.info(`Duration: ${(duration / 1000).toFixed(1)}s`);
       console.log(chalk.cyan("═".repeat(60)));
 
-      await daemon.shutdown();
-      process.exit(result.status === "completed" ? 0 : 1);
+      process.exit(completed ? 0 : 1);
     } catch (error) {
       console.error("\n✗ Fatal error:", error);
-      await daemon.shutdown();
       process.exit(1);
     }
   });
@@ -411,37 +639,47 @@ program
   .action(async () => {
     console.log(chalk.bold("Checking Otus prerequisites...\n"));
 
-    // We need minimal config to run checks
-    // Use empty API keys since we're not actually running inference
-    const daemon = new OtusDaemon({
-      workspacePath: process.cwd(),
-      anthropicApiKey: process.env.ANTHROPIC_API_KEY || "check-mode",
-      voyageApiKey: process.env.VOYAGE_API_KEY || "check-mode",
-    });
+    // Check if daemon is running
+    if (!(await isDaemonRunning())) {
+      console.log(chalk.yellow("Note: Daemon is not running. Starting temporarily for checks..."));
+      console.log(chalk.gray('(Run "otus daemon start" to start the daemon)\n'));
+    }
 
-    const check = await daemon.checkPrerequisites();
+    const client = new DaemonClient();
+    
+    try {
+      const check = await client.checkPrerequisites(process.cwd());
 
-    if (check.ok) {
-      console.log(chalk.green("✓ All prerequisites met! You're ready to use Otus.\n"));
-      console.log(chalk.bold("Next steps:"));
-      console.log("  1. Set API keys:");
-      console.log(chalk.gray("     otus config set anthropic_api_key"));
-      console.log(chalk.gray("     otus config set voyage_api_key"));
-      console.log("  2. Initialize workspace: " + chalk.cyan("otus init"));
-      console.log("  3. Run a task: " + chalk.cyan('otus do "your task"'));
-    } else {
-      console.log(chalk.red("✗ Missing prerequisites:\n"));
-      for (const issue of check.issues) {
-        console.log(chalk.yellow(`  • ${issue}`));
+      if (check.ok) {
+        console.log(chalk.green("✓ All prerequisites met! You're ready to use Otus.\n"));
+        console.log(chalk.bold("Next steps:"));
+        console.log("  1. Set API keys:");
+        console.log(chalk.gray("     otus config set anthropic_api_key"));
+        console.log(chalk.gray("     otus config set voyage_api_key"));
+        console.log("  2. Start daemon: " + chalk.cyan("otus daemon start"));
+        console.log("  3. Initialize workspace: " + chalk.cyan("otus init"));
+        console.log("  4. Run a task: " + chalk.cyan('otus do "your task"'));
+      } else {
+        console.log(chalk.red("✗ Missing prerequisites:\n"));
+        for (const issue of check.issues) {
+          console.log(chalk.yellow(`  • ${issue}`));
+        }
+        console.log(chalk.bold("\nSetup steps:"));
+        console.log(chalk.gray("  1. ./infra/setup-firecracker.sh    # Install Firecracker"));
+        console.log(chalk.gray("  2. ./infra/build-kernel.sh          # Download Linux kernel"));
+        console.log(chalk.gray("  3. ./infra/build-rootfs.sh          # Build guest filesystem"));
+        console.log(chalk.bold("\nFor KVM access issues:"));
+        console.log(chalk.gray("  sudo usermod -aG kvm $USER"));
+        console.log(chalk.gray("  # Then log out and log back in"));
+        process.exit(1);
       }
-      console.log(chalk.bold("\nSetup steps:"));
-      console.log(chalk.gray("  1. ./infra/setup-firecracker.sh    # Install Firecracker"));
-      console.log(chalk.gray("  2. ./infra/build-kernel.sh          # Download Linux kernel"));
-      console.log(chalk.gray("  3. ./infra/build-rootfs.sh          # Build guest filesystem"));
-      console.log(chalk.bold("\nFor KVM access issues:"));
-      console.log(chalk.gray("  sudo usermod -aG kvm $USER"));
-      console.log(chalk.gray("  # Then log out and log back in"));
-      process.exit(1);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Daemon not running")) {
+        console.log(chalk.red("✗ Could not connect to daemon"));
+        console.log(chalk.gray('Run "otus daemon start" first'));
+        process.exit(1);
+      }
+      throw error;
     }
   });
 
