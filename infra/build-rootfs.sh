@@ -272,6 +272,9 @@ sudo rm -rf "$ROOTFS_DIR"
 
 ls -lh "$ROOTFS_IMAGE"
 
+echo "==> Setting permissions on rootfs image"
+sudo chown "$USER" "$ROOTFS_IMAGE"
+
 echo ""
 echo "==> Rootfs build complete!"
 echo "Included: bash, git, python3, nodejs, build-essential, common tools"
