@@ -260,8 +260,11 @@ export class DaemonServer {
       );
     }
 
+    this.logger.debug(`HANDLE_SEND_MESSAGE: Creating SSE stream for session ${sessionId}`);
     // Stream events as SSE
-    return this.createSSEStream(engine.chat(message));
+    const response = this.createSSEStream(engine.chat(message));
+    this.logger.debug(`HANDLE_SEND_MESSAGE: Response created, returning`);
+    return response;
   }
 
   /**
@@ -375,34 +378,85 @@ export class DaemonServer {
   }
 
   /**
-   * Create an SSE stream from an async generator of inference events
+   * Create an SSE stream from an async generator of inference events.
+   * Uses keepalive pings to prevent connection timeout during long operations
+   * (Bun Unix sockets have aggressive idle timeouts).
    */
   private createSSEStream(generator: AsyncGenerator<InferenceEvent>): Response {
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const event of generator) {
-            const data = JSON.stringify(event);
-            const sseMessage = `data: ${data}\n\n`;
-            controller.enqueue(new TextEncoder().encode(sseMessage));
+    let cancelled = false;
+    let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+    const encoder = new TextEncoder();
+    
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Send keepalive pings every second to prevent idle timeout
+        keepAliveTimer = setInterval(() => {
+          if (!cancelled) {
+            try {
+              controller.enqueue(encoder.encode(": ping\n\n"));
+            } catch {
+              if (keepAliveTimer) {
+                clearInterval(keepAliveTimer);
+                keepAliveTimer = null;
+              }
+            }
           }
-          // Send a final "done" signal to indicate clean stream completion
-          const doneMessage = `data: ${JSON.stringify({ type: "stream_end" })}\n\n`;
-          controller.enqueue(new TextEncoder().encode(doneMessage));
-          controller.close();
-        } catch (error) {
-          const errorEvent: InferenceEvent = {
-            type: "error",
-            message: error instanceof Error ? error.message : String(error),
-          };
-          const data = JSON.stringify(errorEvent);
-          const sseMessage = `data: ${data}\n\n`;
-          controller.enqueue(new TextEncoder().encode(sseMessage));
-          controller.close();
+        }, 1000);
+        
+        // Process generator events in background
+        (async () => {
+          try {
+            for await (const event of generator) {
+              if (cancelled) break;
+              
+              const sseMessage = `data: ${JSON.stringify(event)}\n\n`;
+              try {
+                controller.enqueue(encoder.encode(sseMessage));
+              } catch {
+                break;
+              }
+            }
+            
+            if (!cancelled) {
+              try {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "stream_end" })}\n\n`));
+                controller.close();
+              } catch {
+                // Connection already closed
+              }
+            }
+          } catch (error) {
+            if (!cancelled) {
+              try {
+                const errorEvent: InferenceEvent = {
+                  type: "error",
+                  message: error instanceof Error ? error.message : String(error),
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
+                controller.close();
+              } catch {
+                // Connection already closed
+              }
+            }
+          } finally {
+            if (keepAliveTimer) {
+              clearInterval(keepAliveTimer);
+              keepAliveTimer = null;
+            }
+          }
+        })();
+      },
+      
+      cancel() {
+        cancelled = true;
+        if (keepAliveTimer) {
+          clearInterval(keepAliveTimer);
+          keepAliveTimer = null;
         }
+        generator.return(undefined).catch(() => {});
       },
     });
-
+    
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",

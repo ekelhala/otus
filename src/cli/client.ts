@@ -138,9 +138,13 @@ export class DaemonClient {
         }
       }
     } catch (error) {
-      // Ignore "connection closed" errors that occur after stream completes normally
-      if (error instanceof Error && error.message.includes("socket connection was closed")) {
-        return; // Stream completed successfully
+      // Log connection errors for debugging
+      if (error instanceof Error) {
+        if (error.message.includes("socket connection was closed")) {
+          console.error("[Client] Connection to daemon was closed unexpectedly (sendMessage)");
+          return; // Exit the generator gracefully
+        }
+        console.error(`[Client] Stream error: ${error.message}`);
       }
       throw error;
     } finally {
@@ -213,9 +217,13 @@ export class DaemonClient {
         }
       }
     } catch (error) {
-      // Ignore "connection closed" errors that occur after stream completes normally
-      if (error instanceof Error && error.message.includes("socket connection was closed")) {
-        return; // Stream completed successfully
+      // Log connection errors for debugging
+      if (error instanceof Error) {
+        if (error.message.includes("socket connection was closed")) {
+          console.error("[Client] Connection to daemon was closed unexpectedly (runTask)");
+          return; // Exit the generator gracefully
+        }
+        console.error(`[Client] Stream error: ${error.message}`);
       }
       throw error;
     } finally {
