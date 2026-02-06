@@ -175,7 +175,7 @@ export const EMBEDDINGS = {
  */
 export const LLM = {
   /** OpenRouter model identifier */
-  MODEL: "anthropic/claude-sonnet-4-5-20250929",
+  MODEL: "anthropic/claude-haiku-4.5",
   /** Maximum tokens for completion */
   MAX_TOKENS: 4096,
   /** Number of RAG results to include in context */
