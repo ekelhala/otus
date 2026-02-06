@@ -380,6 +380,116 @@ export class GuestAgentClient {
     return response.result as any;
   }
 
+  // ========== Session (tmux) methods ==========
+
+  /**
+   * Start a new tmux session in the guest
+   */
+  async startSession(
+    name: string,
+    cwd?: string
+  ): Promise<{
+    name: string;
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.connection.request("start_session", {
+      name,
+      cwd,
+    });
+
+    if (response.error) {
+      throw new Error(`Start session failed: ${response.error.message}`);
+    }
+
+    return response.result as any;
+  }
+
+  /**
+   * Send a command to a tmux session
+   */
+  async sendToSession(
+    name: string,
+    command: string,
+    enter = true
+  ): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.connection.request("send_to_session", {
+      name,
+      command: Buffer.from(command).toString("base64"),
+      enter,
+    });
+
+    if (response.error) {
+      throw new Error(`Send to session failed: ${response.error.message}`);
+    }
+
+    return response.result as any;
+  }
+
+  /**
+   * Read output from a tmux session
+   */
+  async readSession(
+    name: string,
+    lines = 1000
+  ): Promise<{
+    output: string;
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.connection.request("read_session", {
+      name,
+      lines,
+    });
+
+    if (response.error) {
+      throw new Error(`Read session failed: ${response.error.message}`);
+    }
+
+    return response.result as any;
+  }
+
+  /**
+   * List all active tmux sessions
+   */
+  async listSessions(): Promise<{
+    sessions: Array<{
+      name: string;
+      created: string;
+      attached: boolean;
+      windows: number;
+    }>;
+  }> {
+    const response = await this.connection.request("list_sessions");
+
+    if (response.error) {
+      throw new Error(`List sessions failed: ${response.error.message}`);
+    }
+
+    return response.result as any;
+  }
+
+  /**
+   * Kill a tmux session
+   */
+  async killSession(name: string): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const response = await this.connection.request("kill_session", {
+      name,
+    });
+
+    if (response.error) {
+      throw new Error(`Kill session failed: ${response.error.message}`);
+    }
+
+    return response.result as any;
+  }
+
   /**
    * Close the connection
    */

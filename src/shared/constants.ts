@@ -152,6 +152,8 @@ export const EXECUTION = {
   MAX_ITERATIONS: 50,
   /** Maximum events to include in LLM context */
   MAX_CONTEXT_EVENTS: 3,
+  /** API call timeout in milliseconds (5 minutes) */
+  API_TIMEOUT_MS: 5 * 60 * 1000,
 } as const;
 
 /**

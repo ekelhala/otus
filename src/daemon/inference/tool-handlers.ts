@@ -6,7 +6,7 @@ import type { SandboxManager } from "../sandbox.ts";
 import type { EpisodicMemory } from "../memory/episodic.ts";
 import type { SemanticMemory } from "../memory/semantic.ts";
 import type { Logger } from "@shared/logger.ts";
-import { EXECUTION, LLM } from "@shared/constants.ts";
+import { LLM } from "@shared/constants.ts";
 import type { ToolName } from "./tools.ts";
 
 export interface ToolHandlersConfig {
@@ -53,8 +53,20 @@ export class ToolHandlers {
       case "sync_workspace":
         return await this.syncWorkspace(input as SyncWorkspaceInput);
 
-      case "run_cmd":
-        return await this.runCommand(input as RunCommandInput);
+      case "start_session":
+        return await this.startSession(input as StartSessionInput);
+
+      case "send_to_session":
+        return await this.sendToSession(input as SendToSessionInput);
+
+      case "read_session":
+        return await this.readSession(input as ReadSessionInput);
+
+      case "list_sessions":
+        return await this.listSessions(input as ListSessionsInput);
+
+      case "kill_session":
+        return await this.killSession(input as KillSessionInput);
 
       case "search_code":
         return await this.searchCode(input as SearchCodeInput);
@@ -146,37 +158,6 @@ Workspace not synced (use sync_workspace to push files)`;
   }
 
   /**
-   * Execute a command in a sandbox
-   */
-  private async runCommand(input: RunCommandInput): Promise<string> {
-    const result = await this.sandboxManager.executeInSandbox(input.command, {
-      sandboxId: input.sandbox_id,
-      timeout: input.timeout || EXECUTION.DEFAULT_TIMEOUT,
-    });
-
-    const preview = result.stdout.substring(0, 200);
-    this.logger.toolResult(
-      "run_cmd",
-      `${preview}${result.stdout.length > 200 ? "..." : ""}`
-    );
-
-    // Format output
-    let output = "";
-    if (result.stdout) {
-      output += result.stdout;
-    }
-    if (result.stderr) {
-      output += `\n[stderr]\n${result.stderr}`;
-    }
-    output += `\n[exit code: ${result.exitCode}]`;
-    if (result.timedOut) {
-      output += "\n[TIMED OUT]";
-    }
-
-    return output;
-  }
-
-  /**
    * Search the codebase
    */
   private async searchCode(input: SearchCodeInput): Promise<string> {
@@ -212,6 +193,105 @@ ${result.content}
 
     return "Task marked as complete";
   }
+
+  // ========== Session handlers ==========
+
+  /**
+   * Start a tmux session in the sandbox
+   */
+  private async startSession(input: StartSessionInput): Promise<string> {
+    const sandbox = this.getSandbox(input.sandbox_id);
+    const result = await sandbox.agentClient.startSession(input.name);
+
+    if (!result.success) {
+      return `Failed to start session: ${result.error}`;
+    }
+
+    this.logger.toolResult("start_session", `Started session: ${input.name}`);
+    return `Session '${input.name}' started successfully.\nUse send_to_session to run commands in this session.`;
+  }
+
+  /**
+   * Send a command to a tmux session
+   */
+  private async sendToSession(input: SendToSessionInput): Promise<string> {
+    const sandbox = this.getSandbox(input.sandbox_id);
+    const result = await sandbox.agentClient.sendToSession(input.name, input.command);
+
+    if (!result.success) {
+      return `Failed to send to session: ${result.error}`;
+    }
+
+    this.logger.toolResult("send_to_session", `Sent to ${input.name}: ${input.command.substring(0, 50)}...`);
+    return `Command sent to session '${input.name}'.\nUse read_session to check output.`;
+  }
+
+  /**
+   * Read output from a tmux session
+   */
+  private async readSession(input: ReadSessionInput): Promise<string> {
+    const sandbox = this.getSandbox(input.sandbox_id);
+    const result = await sandbox.agentClient.readSession(input.name, input.lines);
+
+    if (!result.success) {
+      return `Failed to read session: ${result.error}`;
+    }
+
+    const preview = result.output.substring(0, 200);
+    this.logger.toolResult("read_session", `${preview}${result.output.length > 200 ? "..." : ""}`);
+    return result.output || "[no output]";
+  }
+
+  /**
+   * List active tmux sessions
+   */
+  private async listSessions(input: ListSessionsInput): Promise<string> {
+    const sandbox = this.getSandbox(input.sandbox_id);
+    const result = await sandbox.agentClient.listSessions();
+
+    if (result.sessions.length === 0) {
+      return "No active sessions. Use start_session to create one.";
+    }
+
+    const lines = result.sessions.map((s) => 
+      `- ${s.name} (${s.windows} window${s.windows !== 1 ? "s" : ""})`
+    );
+
+    return `Active sessions:\n${lines.join("\n")}`;
+  }
+
+  /**
+   * Kill a tmux session
+   */
+  private async killSession(input: KillSessionInput): Promise<string> {
+    const sandbox = this.getSandbox(input.sandbox_id);
+    const result = await sandbox.agentClient.killSession(input.name);
+
+    if (!result.success) {
+      return `Failed to kill session: ${result.error}`;
+    }
+
+    this.logger.toolResult("kill_session", `Killed session: ${input.name}`);
+    return `Session '${input.name}' terminated.`;
+  }
+
+  /**
+   * Helper to get sandbox by ID or active sandbox
+   */
+  private getSandbox(sandboxId?: string) {
+    if (sandboxId) {
+      const sandbox = this.sandboxManager.getSandbox(sandboxId);
+      if (!sandbox) {
+        throw new Error(`Sandbox not found: ${sandboxId}`);
+      }
+      return sandbox;
+    }
+    const active = this.sandboxManager.getActiveSandbox();
+    if (!active) {
+      throw new Error("No active sandbox. Start one with start_sandbox first.");
+    }
+    return active;
+  }
 }
 
 // Tool input types
@@ -230,12 +310,6 @@ interface SyncWorkspaceInput {
   sandbox_id?: string;
 }
 
-interface RunCommandInput {
-  command: string;
-  sandbox_id?: string;
-  timeout?: number;
-}
-
 interface SearchCodeInput {
   query: string;
   limit?: number;
@@ -244,4 +318,30 @@ interface SearchCodeInput {
 interface TaskCompleteInput {
   summary: string;
   lessons?: string[];
+}
+
+interface StartSessionInput {
+  name: string;
+  sandbox_id?: string;
+}
+
+interface SendToSessionInput {
+  name: string;
+  command: string;
+  sandbox_id?: string;
+}
+
+interface ReadSessionInput {
+  name: string;
+  lines?: number;
+  sandbox_id?: string;
+}
+
+interface ListSessionsInput {
+  sandbox_id?: string;
+}
+
+interface KillSessionInput {
+  name: string;
+  sandbox_id?: string;
 }

@@ -12,7 +12,11 @@ export type ToolName =
   | "stop_sandbox"
   | "list_sandboxes"
   | "sync_workspace"
-  | "run_cmd"
+  | "start_session"
+  | "send_to_session"
+  | "read_session"
+  | "list_sessions"
+  | "kill_session"
   | "search_code"
   | "task_complete";
 
@@ -95,29 +99,102 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "run_cmd",
+    name: "start_session",
     description:
-      "Execute a shell command in a sandbox VM. Each command runs in a fresh shell. You must start a sandbox first. Commands BLOCK until completion or timeout. For long-running processes (servers, watch modes), use & to background them. Working directory defaults to /workspace (contains project files).",
+      "Start a persistent tmux session for running long-lived processes (servers, watch modes, etc.). Sessions persist across tool calls and can capture output. Use this instead of backgrounding commands with &.",
     input_schema: {
       type: "object",
       properties: {
-        command: {
+        name: {
           type: "string",
-          description:
-            "The shell command to execute. Environment persists between calls. Use & to background long-running processes.",
+          description: "Unique name for the session (e.g., 'dev-server', 'tests')",
         },
         sandbox_id: {
           type: "string",
-          description:
-            "ID of the sandbox to run in. If not provided, uses the active sandbox.",
-        },
-        timeout: {
-          type: "number",
-          description:
-            "Timeout in seconds (default: 300). Command is killed if exceeded.",
+          description: "ID of the sandbox. If not provided, uses the active sandbox.",
         },
       },
-      required: ["command"],
+      required: ["name"],
+    },
+  },
+  {
+    name: "send_to_session",
+    description:
+      "Send a command to an existing tmux session. The command runs in the session's persistent shell. Great for starting servers, running watch modes, or any long-running process.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the session to send to",
+        },
+        command: {
+          type: "string",
+          description: "The command to send to the session",
+        },
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox. If not provided, uses the active sandbox.",
+        },
+      },
+      required: ["name", "command"],
+    },
+  },
+  {
+    name: "read_session",
+    description:
+      "Read the current output from a tmux session. Use this to check on the status of a running process, see server logs, or check for errors.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the session to read from",
+        },
+        lines: {
+          type: "number",
+          description: "Number of lines of output to capture (default: 1000)",
+        },
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox. If not provided, uses the active sandbox.",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "list_sessions",
+    description:
+      "List all active tmux sessions in a sandbox. Shows session names, creation time, and number of windows.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox. If not provided, uses the active sandbox.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "kill_session",
+    description:
+      "Terminate a tmux session and its running processes. Use this to stop servers or clean up background processes when done.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the session to kill",
+        },
+        sandbox_id: {
+          type: "string",
+          description: "ID of the sandbox. If not provided, uses the active sandbox.",
+        },
+      },
+      required: ["name"],
     },
   },
   {

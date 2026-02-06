@@ -102,8 +102,9 @@ export class InferenceEngine {
       yield { type: "complete", summary: completionSummary };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`Error in chat loop: ${errorMessage}`);
       yield { type: "error", message: errorMessage };
-      throw error;
+      // Don't re-throw - error event is sufficient and re-throwing can cause generator issues
     }
   }
 
@@ -185,7 +186,16 @@ export class InferenceEngine {
     });
 
     // Call Claude and get response
-    const response = await this.callClaude();
+    let response: Anthropic.Message;
+    try {
+      response = await this.callClaude();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.debug(`API call failed: ${errorMessage}`);
+      // Yield error event and stop gracefully instead of throwing
+      yield { type: "error", message: `API error: ${errorMessage}` };
+      return { complete: true, summary: `Error: ${errorMessage}` };
+    }
 
     // Add assistant response to messages
     this.messages.push({
@@ -195,10 +205,13 @@ export class InferenceEngine {
 
     // Process response
     const { toolCalls, textContent } = this.parseResponse(response);
+    this.logger.debug(`Parsed response: ${toolCalls.length} tool calls, text length: ${textContent.length}`);
 
     // Yield thinking text if present
     if (textContent) {
+      this.logger.debug(`About to yield thinking event (${textContent.length} chars)`);
       yield { type: "thinking", text: textContent };
+      this.logger.debug(`Yielded thinking event successfully`);
       this.logger.thinking(textContent);
       this.episodicMemory.logEvent(this.sessionId, "think", {
         iteration,
@@ -208,7 +221,9 @@ export class InferenceEngine {
 
     // Execute tool calls if present
     if (toolCalls.length > 0) {
+      this.logger.debug(`Executing ${toolCalls.length} tool calls`);
       const result = yield* this.executeToolCalls(toolCalls, iteration);
+      this.logger.debug(`Tool calls completed, turnComplete=${result.complete}`);
       return result;
     }
 
@@ -222,12 +237,22 @@ export class InferenceEngine {
    * Call Claude API with current messages
    */
   private async callClaude(): Promise<Anthropic.Message> {
-    return await this.client.messages.create({
-      model: LLM.MODEL,
-      max_tokens: LLM.MAX_TOKENS,
-      messages: this.messages,
-      tools,
-    });
+    this.logger.debug(`Calling Claude API with ${this.messages.length} messages`);
+    
+    const response = await this.client.messages.create(
+      {
+        model: LLM.MODEL,
+        max_tokens: LLM.MAX_TOKENS,
+        messages: this.messages,
+        tools,
+      },
+      {
+        timeout: EXECUTION.API_TIMEOUT_MS,
+      }
+    );
+    
+    this.logger.debug(`Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}`);
+    return response;
   }
 
   /**
@@ -237,12 +262,15 @@ export class InferenceEngine {
     toolCalls: Anthropic.ToolUseBlock[],
     iteration: number
   ): AsyncGenerator<InferenceEvent, IterationResult> {
+    this.logger.debug(`executeToolCalls started with ${toolCalls.length} calls`);
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     let turnComplete = false;
     let completionSummary: string | undefined;
 
     for (const toolCall of toolCalls) {
+      this.logger.debug(`About to delegate to executeSingleToolCall for ${toolCall.name}`);
       const result = yield* this.executeSingleToolCall(toolCall, iteration);
+      this.logger.debug(`executeSingleToolCall returned for ${toolCall.name}`);
       toolResults.push(result.toolResult);
 
       if (result.isTaskComplete) {
@@ -267,8 +295,11 @@ export class InferenceEngine {
     toolCall: Anthropic.ToolUseBlock,
     iteration: number
   ): AsyncGenerator<InferenceEvent, ToolCallResult> {
+    this.logger.debug(`Executing tool: ${toolCall.name}`);
     try {
+      this.logger.debug(`Yielding tool_call event for ${toolCall.name}`);
       yield { type: "tool_call", name: toolCall.name, input: toolCall.input };
+      this.logger.debug(`Yielded tool_call event, now logging`);
       this.logger.tool(toolCall.name, toolCall.input);
 
       // Log action

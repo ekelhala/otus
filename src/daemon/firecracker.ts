@@ -134,7 +134,7 @@ export class FirecrackerVM {
       binaryPath: "./infra/firecracker",
       guestCid: 3,
       vcpuCount: 2,
-      memSizeMib: 512,
+      memSizeMib: 1024,
       bootArgs: "console=ttyS0 reboot=k panic=1 pci=off quiet",
       enableNetwork: true,
       ...config,
