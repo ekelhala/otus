@@ -7,6 +7,8 @@ import { existsSync, writeFileSync, readFileSync } from "fs";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
+import { minimatch } from "minimatch";
+import * as tar from "tar";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { GuestAgentClient } from "./vsock.ts";
 import { VSOCK, resolveVMAssets, getVMAssetInstructions, SYSTEM_PATHS } from "../shared/constants.ts";
@@ -411,7 +413,8 @@ export class SandboxManager {
       return { size: 0 };
     }
 
-    // Extract to workspace
+    // Extract to workspace, then delete any stale host files not present in the sandbox snapshot.
+    // This mirrors the sandbox contents for the synced subset, while leaving excluded paths untouched.
     const { mkdtemp } = await import("fs/promises");
     const tmpDir = await mkdtemp(join(tmpdir(), "otus-sync-"));
     const tarFile = join(tmpDir, "workspace.tar.gz");
@@ -419,16 +422,27 @@ export class SandboxManager {
     try {
       writeFileSync(tarFile, result.tarData);
 
-      const proc = Bun.spawn(
-        ["tar", "-xzf", tarFile, "-C", this.config.workspacePath],
-        { stdout: "pipe", stderr: "pipe" }
-      );
-      await proc.exited;
-
-      if (proc.exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text();
-        throw new Error(`tar extract failed: ${stderr}`);
+      // 1) Extract snapshot into workspace (overlay)
+      try {
+        await tar.x({
+          file: tarFile,
+          cwd: this.config.workspacePath,
+          gzip: true,
+        });
+      } catch (error) {
+        throw new Error(
+          `tar extract failed: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
+
+      // 2) Build snapshot manifest from the tarball
+      const snapshot = await this.getTarSnapshotPaths(tarFile);
+
+      // 3) Delete any host files/dirs not present in snapshot (except excluded paths)
+      await this.deleteStaleHostPaths({
+        snapshot,
+        excludes,
+      });
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
@@ -445,28 +459,175 @@ export class SandboxManager {
       return content
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"));
+        .filter((line) => line && !line.startsWith("#"))
+        // .otusignore is always synced and must never be excluded.
+        .filter((pattern) => !this.isAlwaysSyncedPath(pattern));
     } catch {
       return [];
     }
+  }
+
+  private isAlwaysSyncedPath(pattern: string): boolean {
+    const normalized = pattern.replace(/^\.\//, "").trim();
+    return normalized === ".otusignore" || normalized === "**/.otusignore";
+  }
+
+  private async getTarSnapshotPaths(tarFile: string): Promise<Set<string>> {
+    const snapshotPaths = new Set<string>();
+
+    const entryPaths: string[] = [];
+    await tar.t({
+      file: tarFile,
+      gzip: true,
+      onentry: (entry) => {
+        entryPaths.push(entry.path);
+      },
+    });
+
+    for (const entryPath of entryPaths) {
+      const normalized = this.normalizeRelPath(entryPath);
+      if (!normalized) continue;
+      snapshotPaths.add(normalized);
+
+      // Ensure parent directories are considered present even if not explicitly listed.
+      const parts = normalized.split("/");
+      if (parts.length > 1) {
+        let current = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+          current = current ? `${current}/${parts[i]}` : parts[i]!;
+          snapshotPaths.add(current);
+        }
+      }
+    }
+
+    return snapshotPaths;
+  }
+
+  private normalizeRelPath(p: string): string {
+    let s = p.trim();
+    if (!s) return "";
+    // tar listings sometimes include leading './'
+    if (s === "." || s === "./") return "";
+    s = s.replace(/^\.\//, "");
+    // Normalize directory entries that end with '/'
+    s = s.replace(/\/$/, "");
+    if (!s) return "";
+    return s;
+  }
+
+  private shouldExcludePath(relPath: string, excludes: string[]): boolean {
+    // Always allow .otusignore to participate in sync
+    if (relPath === ".otusignore") return false;
+
+    // Best-effort match tar-style excludes using minimatch.
+    // Match both the whole path and the basename to emulate tar's common behavior
+    // for patterns without slashes (e.g., 'node_modules', '.git', '*.tmp').
+    const baseName = relPath.split("/").pop() || relPath;
+
+    for (const pattern of excludes) {
+      const pat = pattern.trim();
+      if (!pat) continue;
+
+      // Directories in tar listings won't have trailing '/', but patterns may refer to directory names.
+      if (
+        minimatch(relPath, pat, { dot: true, matchBase: true }) ||
+        minimatch(baseName, pat, { dot: true, matchBase: true })
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private async deleteStaleHostPaths(args: {
+    snapshot: Set<string>;
+    excludes: string[];
+  }): Promise<void> {
+    const { readdir } = await import("fs/promises");
+
+    const walk = async (absDir: string, relDir: string): Promise<boolean> => {
+      const entries = await readdir(absDir, { withFileTypes: true });
+
+      let containsExcludedDescendant = false;
+
+      // Recurse first so we can safely decide whether it's OK to delete a directory.
+      const childDirHasExcluded = new Map<string, boolean>();
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+
+        const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+        const normalized = this.normalizeRelPath(relPath);
+        if (!normalized) continue;
+
+        if (this.shouldExcludePath(normalized, args.excludes)) {
+          containsExcludedDescendant = true;
+          continue;
+        }
+
+        const hasExcluded = await walk(join(absDir, entry.name), normalized);
+        childDirHasExcluded.set(normalized, hasExcluded);
+        if (hasExcluded) containsExcludedDescendant = true;
+      }
+
+      // Delete files/dirs not present in snapshot (but never touch excluded paths).
+      for (const entry of entries) {
+        const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+        const normalized = this.normalizeRelPath(relPath);
+        if (!normalized) continue;
+
+        if (this.shouldExcludePath(normalized, args.excludes)) {
+          containsExcludedDescendant = true;
+          continue;
+        }
+
+        if (!args.snapshot.has(normalized)) {
+          const absPath = join(this.config.workspacePath, normalized);
+          if (entry.isDirectory()) {
+            const hasExcluded = childDirHasExcluded.get(normalized) ?? false;
+            // If this directory contains excluded descendants, we must not delete it wholesale,
+            // otherwise we'd indirectly delete do-not-sync paths.
+            if (!hasExcluded) {
+              await rm(absPath, { recursive: true, force: true });
+            }
+          } else {
+            await rm(absPath, { recursive: true, force: true });
+          }
+        }
+      }
+
+      return containsExcludedDescendant;
+    };
+
+    await walk(this.config.workspacePath, "");
   }
 
   /**
    * Create tar archive of workspace
    */
   private async createWorkspaceTar(): Promise<Buffer> {
-    const patterns = await this.parseIgnoreFile();
-    const excludes = patterns.map((pattern) => `--exclude=${pattern}`);
+    const excludes = await this.parseIgnoreFile();
 
-    const proc = Bun.spawn(
-      ["tar", "-czf", "-", ...excludes, "-C", this.config.workspacePath, "."],
-      { stdout: "pipe", stderr: "pipe" }
+    const stream = tar.c(
+      {
+        gzip: true,
+        cwd: this.config.workspacePath,
+        portable: true,
+        noMtime: true,
+        filter: (p) => {
+          const rel = this.normalizeRelPath(p);
+          if (!rel) return true;
+          return !this.shouldExcludePath(rel, excludes);
+        },
+      },
+      ["."]
     );
 
-    const output = await new Response(proc.stdout).arrayBuffer();
-    await proc.exited;
-
-    return Buffer.from(output);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
 
   /**

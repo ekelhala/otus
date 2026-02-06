@@ -8,7 +8,8 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } fr
 import { mkdir, writeFile, readFile, rm } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
-import { $ } from "bun";
+import { minimatch } from "minimatch";
+import * as tar from "tar";
 import { GuestAgentClient } from "./vsock.ts";
 import { FirecrackerVM, findFirecrackerBinary } from "./firecracker.ts";
 import { FIRECRACKER, VSOCK, resolveVMAssets } from "@shared/constants.ts";
@@ -22,7 +23,12 @@ async function parseIgnoreFile(filePath: string): Promise<string[]> {
     return content
       .split("\n")
       .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#"));
+      .filter((line) => line && !line.startsWith("#"))
+      // .otusignore is always synced and must never be excluded.
+      .filter((pattern) => {
+        const normalized = pattern.replace(/^\.\//, "").trim();
+        return normalized !== ".otusignore" && normalized !== "**/.otusignore";
+      });
   } catch {
     return [];
   }
@@ -35,14 +41,42 @@ async function createTarWithExcludes(
   sourcePath: string,
   excludes: string[]
 ): Promise<Buffer> {
-  const excludeArgs = excludes.map((p) => `--exclude=${p}`);
-  const proc = Bun.spawn(
-    ["tar", "-czf", "-", ...excludeArgs, "-C", sourcePath, "."],
-    { stdout: "pipe", stderr: "pipe" }
+  const shouldExcludePath = (relPath: string): boolean => {
+    if (relPath === ".otusignore") return false;
+    const baseName = relPath.split("/").pop() || relPath;
+    for (const pattern of excludes) {
+      const pat = pattern.trim();
+      if (!pat) continue;
+      if (
+        minimatch(relPath, pat, { dot: true, matchBase: true }) ||
+        minimatch(baseName, pat, { dot: true, matchBase: true })
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const stream = tar.c(
+    {
+      gzip: true,
+      cwd: sourcePath,
+      portable: true,
+      noMtime: true,
+      filter: (p) => {
+        const rel = p.replace(/^\.\//, "").replace(/\/$/, "");
+        if (!rel || rel === ".") return true;
+        return !shouldExcludePath(rel);
+      },
+    },
+    ["."]
   );
-  const output = await new Response(proc.stdout).arrayBuffer();
-  await proc.exited;
-  return Buffer.from(output);
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -52,8 +86,17 @@ async function listTarContents(tarData: Buffer): Promise<string[]> {
   const tmpFile = join(tmpdir(), `tar-list-${Date.now()}.tar.gz`);
   await writeFile(tmpFile, tarData);
   try {
-    const result = await $`tar -tzf ${tmpFile}`.text();
-    return result.trim().split("\n").filter(Boolean);
+    const contents: string[] = [];
+    await tar.t({
+      file: tmpFile,
+      gzip: true,
+      onentry: (entry) => contents.push(entry.path),
+    });
+    return contents
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => p.replace(/^\.\//, "").replace(/\/$/, ""))
+      .filter((p) => p && p !== ".");
   } finally {
     await rm(tmpFile, { force: true });
   }
@@ -145,6 +188,14 @@ describe("parseIgnoreFile", () => {
     const patterns = await parseIgnoreFile(ignorePath);
 
     expect(patterns).toEqual([]);
+  });
+
+  test("never excludes .otusignore", async () => {
+    const ignorePath = join(testDir, ".otusignore");
+    await writeFile(ignorePath, ".otusignore\n**/.otusignore\nnode_modules\n");
+
+    const patterns = await parseIgnoreFile(ignorePath);
+    expect(patterns).toEqual(["node_modules"]);
   });
 });
 
