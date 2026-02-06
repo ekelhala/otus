@@ -11,6 +11,7 @@
     "build": "OTUS_ENV=production bun build src/cli/otus.ts --compile --outfile dist/otus --env inline",
     "build:agent": "cd src/agent-go && make build",
     "dev": "bun src/cli/otus.ts",
+    "daemon": "bun run src/daemon/main.ts",
     "setup:network": "sudo ./infra/setup-tap-pool.sh",
     "check:network": "sudo ./infra/check-tap-pool.sh",
     "remove:network": "sudo ./infra/remove-tap-pool.sh",
