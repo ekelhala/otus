@@ -76,7 +76,7 @@ sudo mount --bind /sys "${ROOTFS_DIR}/sys"
 sudo mount --bind /dev "${ROOTFS_DIR}/dev"
 sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 
-sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm tree && apt-get clean"
+sudo chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends python3-pip python3-venv nodejs npm tree tmux && apt-get clean"
 
 # Unmounts will be handled by the cleanup trap
 

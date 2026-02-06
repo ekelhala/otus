@@ -325,3 +325,169 @@ func (s *Server) handleSyncFromGuest(params *SyncFromGuestParams) (*SyncFromGues
 func shouldSkip(name string, isDir bool) bool {
 	return false
 }
+
+// ========== Session (tmux) handlers ==========
+
+// handleStartSession creates a new tmux session
+func (s *Server) handleStartSession(params *StartSessionParams) (*StartSessionResult, error) {
+	if params.Name == "" {
+		return &StartSessionResult{Success: false, Error: "session name is required"}, nil
+	}
+
+	cwd := params.Cwd
+	if cwd == "" {
+		cwd = DefaultCwd
+	}
+
+	// Check if session already exists
+	checkCmd := exec.Command("tmux", "has-session", "-t", params.Name)
+	if err := checkCmd.Run(); err == nil {
+		return &StartSessionResult{
+			Name:    params.Name,
+			Success: true, // Session already exists, consider it a success
+		}, nil
+	}
+
+	// Create new tmux session (detached)
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", params.Name, "-c", cwd)
+	cmd.Env = os.Environ()
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return &StartSessionResult{
+			Name:    params.Name,
+			Success: false,
+			Error:   fmt.Sprintf("failed to create session: %v: %s", err, string(output)),
+		}, nil
+	}
+
+	return &StartSessionResult{
+		Name:    params.Name,
+		Success: true,
+	}, nil
+}
+
+// handleSendToSession sends a command to a tmux session
+func (s *Server) handleSendToSession(params *SendToSessionParams) (*SendToSessionResult, error) {
+	if params.Name == "" {
+		return &SendToSessionResult{Success: false, Error: "session name is required"}, nil
+	}
+
+	// Check if session exists
+	checkCmd := exec.Command("tmux", "has-session", "-t", params.Name)
+	if err := checkCmd.Run(); err != nil {
+		return &SendToSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("session %s does not exist", params.Name),
+		}, nil
+	}
+
+	// Decode command from base64
+	decoded, err := base64.StdEncoding.DecodeString(params.Command)
+	if err != nil {
+		return &SendToSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to decode base64 command: %v", err),
+		}, nil
+	}
+	command := string(decoded)
+
+	// Send keys to the session
+	// Using send-keys with the command, followed by Enter
+	// Always send Enter since this is for command execution
+	args := []string{"send-keys", "-t", params.Name, command, "Enter"}
+
+	cmd := exec.Command("tmux", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return &SendToSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to send to session: %v: %s", err, string(output)),
+		}, nil
+	}
+
+	return &SendToSessionResult{Success: true}, nil
+}
+
+// handleReadSession reads output from a tmux session using capture-pane
+func (s *Server) handleReadSession(params *ReadSessionParams) (*ReadSessionResult, error) {
+	if params.Name == "" {
+		return &ReadSessionResult{Success: false, Error: "session name is required"}, nil
+	}
+
+	// Check if session exists
+	checkCmd := exec.Command("tmux", "has-session", "-t", params.Name)
+	if err := checkCmd.Run(); err != nil {
+		return &ReadSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("session %s does not exist", params.Name),
+		}, nil
+	}
+
+	lines := params.Lines
+	if lines <= 0 {
+		lines = 1000 // Default to capturing 1000 lines
+	}
+
+	// Use capture-pane to get the session output
+	// -p prints to stdout, -S specifies start line (negative = history)
+	cmd := exec.Command("tmux", "capture-pane", "-t", params.Name, "-p", "-S", fmt.Sprintf("-%d", lines))
+	output, err := cmd.Output()
+	if err != nil {
+		return &ReadSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to capture session output: %v", err),
+		}, nil
+	}
+
+	return &ReadSessionResult{
+		Output:  string(output),
+		Success: true,
+	}, nil
+}
+
+// handleListSessions lists all active tmux sessions
+func (s *Server) handleListSessions() (*ListSessionsResult, error) {
+	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}|#{session_created}|#{session_attached}|#{session_windows}")
+	output, err := cmd.Output()
+	if err != nil {
+		// No sessions might return an error, return empty list
+		return &ListSessionsResult{Sessions: []SessionInfo{}}, nil
+	}
+
+	var sessions []SessionInfo
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) >= 4 {
+			windows := 0
+			fmt.Sscanf(parts[3], "%d", &windows)
+			sessions = append(sessions, SessionInfo{
+				Name:     parts[0],
+				Created:  parts[1],
+				Attached: parts[2] == "1",
+				Windows:  windows,
+			})
+		}
+	}
+
+	return &ListSessionsResult{Sessions: sessions}, nil
+}
+
+// handleKillSession terminates a tmux session
+func (s *Server) handleKillSession(params *KillSessionParams) (*KillSessionResult, error) {
+	if params.Name == "" {
+		return &KillSessionResult{Success: false, Error: "session name is required"}, nil
+	}
+
+	cmd := exec.Command("tmux", "kill-session", "-t", params.Name)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return &KillSessionResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to kill session: %v: %s", err, string(output)),
+		}, nil
+	}
+
+	return &KillSessionResult{Success: true}, nil
+}

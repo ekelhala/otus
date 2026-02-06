@@ -129,3 +129,68 @@ type SyncFromGuestResult struct {
 	TarData string `json:"tarData"` // Base64-encoded tar.gz
 	Size    int    `json:"size"`    // Size in bytes
 }
+
+// ========== Session (tmux) types ==========
+
+// StartSessionParams contains parameters for starting a tmux session
+type StartSessionParams struct {
+	Name string `json:"name"`          // Session name (required)
+	Cwd  string `json:"cwd,omitempty"` // Working directory (default: /workspace)
+}
+
+// StartSessionResult contains the result of starting a session
+type StartSessionResult struct {
+	Name    string `json:"name"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// SendToSessionParams contains parameters for sending a command to a session
+type SendToSessionParams struct {
+	Name    string `json:"name"`            // Session name
+	Command string `json:"command"`         // Base64-encoded command to send
+	Enter   bool   `json:"enter,omitempty"` // Whether to send Enter after command (default: true)
+}
+
+// SendToSessionResult contains the result of sending to a session
+type SendToSessionResult struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ReadSessionParams contains parameters for reading session output
+type ReadSessionParams struct {
+	Name  string `json:"name"`            // Session name
+	Lines int    `json:"lines,omitempty"` // Number of lines to capture (default: 1000)
+}
+
+// ReadSessionResult contains the captured session output
+type ReadSessionResult struct {
+	Output  string `json:"output"` // Captured output from the session
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ListSessionsResult contains the list of active sessions
+type ListSessionsResult struct {
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// SessionInfo contains info about a single session
+type SessionInfo struct {
+	Name     string `json:"name"`
+	Created  string `json:"created"`
+	Attached bool   `json:"attached"`
+	Windows  int    `json:"windows"`
+}
+
+// KillSessionParams contains parameters for killing a session
+type KillSessionParams struct {
+	Name string `json:"name"` // Session name to kill
+}
+
+// KillSessionResult contains the result of killing a session
+type KillSessionResult struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}

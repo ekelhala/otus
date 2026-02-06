@@ -219,6 +219,57 @@ func (s *Server) handle(c context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Re
 		}
 		return result, nil
 
+	case "start_session":
+		var params StartSessionParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := s.handleStartSession(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	case "send_to_session":
+		var params SendToSessionParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := s.handleSendToSession(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	case "read_session":
+		var params ReadSessionParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := s.handleReadSession(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	case "list_sessions":
+		result, err := s.handleListSessions()
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
+	case "kill_session":
+		var params KillSessionParams
+		if err := json.Unmarshal(*req.Params, &params); err != nil {
+			return nil, &jsonrpc2.Error{Code: InvalidParams, Message: "Invalid params"}
+		}
+		result, err := s.handleKillSession(&params)
+		if err != nil {
+			return nil, &jsonrpc2.Error{Code: ExecutionError, Message: err.Error()}
+		}
+		return result, nil
+
 	default:
 		return nil, &jsonrpc2.Error{Code: MethodNotFound, Message: "Method not found"}
 	}
