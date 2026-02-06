@@ -1,6 +1,6 @@
 /**
- * Otus Daemon
- * Main orchestrator that coordinates all components
+ * Otus Workspace Context
+ * Manages the state and resources for a single workspace
  */
 
 import { mkdir, readFile, writeFile, mkdtemp, rm } from "fs/promises";
@@ -12,11 +12,11 @@ import { findFirecrackerBinary } from "./firecracker.ts";
 import { EpisodicMemory } from "./memory/episodic.ts";
 import { SemanticMemory } from "./memory/semantic.ts";
 import { VoyageClient } from "./embeddings.ts";
-import { InferenceEngine } from "./inference.ts";
+import { InferenceEngine } from "./inference/index.ts";
 import { SandboxManager } from "./sandbox.ts";
 import { initLogger, getLogger, type Logger } from "@shared/logger.ts";
 
-export interface DaemonConfig {
+export interface WorkspaceConfig {
   workspacePath: string;
   anthropicApiKey: string;
   voyageApiKey: string;
@@ -24,18 +24,11 @@ export interface DaemonConfig {
   verbose?: boolean;
 }
 
-export interface TaskResult {
-  taskId: string;
-  goal: string;
-  status: "completed" | "failed";
-  duration: number;
-}
-
 /**
- * Main Otus Daemon
+ * Workspace Context - manages resources for a single workspace
  */
-export class OtusDaemon {
-  private readonly config: DaemonConfig;
+export class WorkspaceContext {
+  private readonly config: WorkspaceConfig;
   private readonly otusPath: string;
   private readonly otusIgnoreFile: string;
   private readonly logger: Logger;
@@ -45,8 +38,9 @@ export class OtusDaemon {
   private voyageClient: VoyageClient | null = null;
   private sandboxManager: SandboxManager | null = null;
   private inferenceEngine: InferenceEngine | null = null;
+  private sessions: Map<string, { engine: InferenceEngine }> = new Map();
 
-  constructor(config: DaemonConfig) {
+  private constructor(config: WorkspaceConfig) {
     this.config = config;
     this.otusPath = join(config.workspacePath, WORKSPACE.OTUS_DIR);
     // Default to .otusignore in workspace root if not specified
@@ -56,9 +50,18 @@ export class OtusDaemon {
   }
 
   /**
+   * Create and initialize a workspace context
+   */
+  static async create(config: WorkspaceConfig): Promise<WorkspaceContext> {
+    const context = new WorkspaceContext(config);
+    await context.init();
+    return context;
+  }
+
+  /**
    * Check system prerequisites
    */
-  async checkPrerequisites(): Promise<{ ok: boolean; issues: string[] }> {
+  static async checkPrerequisites(): Promise<{ ok: boolean; issues: string[] }> {
     const issues: string[] = [];
 
     // Check for Firecracker binary
@@ -96,7 +99,7 @@ export class OtusDaemon {
   /**
    * Initialize the Otus workspace
    */
-  async init(): Promise<void> {
+  private async init(): Promise<void> {
     this.logger.debug("Initializing workspace...");
 
     // Create .otus directory structure
@@ -261,67 +264,46 @@ coverage
   }
 
   /**
-   * Start an interactive chat session
-   * Returns the inference engine for the caller to run the chat loop
+   * Start a new chat session
    */
-  startChat(): { sessionId: string; chat: (message: string) => Promise<{ complete: boolean; summary?: string }> } {
+  startSession(): string {
     if (!this.inferenceEngine) {
-      throw new Error("Daemon not initialized. Run init() first.");
+      throw new Error("Workspace not initialized");
     }
 
     const sessionId = this.inferenceEngine.startSession();
+    this.sessions.set(sessionId, { engine: this.inferenceEngine });
     
-    return {
-      sessionId,
-      chat: (message: string) => this.inferenceEngine!.chat(message),
-    };
+    return sessionId;
   }
 
   /**
-   * Execute a single task (legacy mode, wraps chat)
+   * Get the inference engine for a session
    */
-  async do(goal: string): Promise<TaskResult> {
-    if (!this.inferenceEngine) {
-      throw new Error("Daemon not initialized. Run init() first.");
-    }
-
-    const startTime = Date.now();
-    const chat = this.startChat();
-
-    this.logger.debug(`Starting task ${chat.sessionId}`);
-    this.logger.debug(`Goal: ${goal}`);
-
-    try {
-      const result = await chat.chat(goal);
-
-      const duration = Date.now() - startTime;
-      this.logger.debug(`Task ${result.complete ? "completed" : "ended"} in ${(duration / 1000).toFixed(1)}s`);
-
-      return {
-        taskId: chat.sessionId,
-        goal,
-        status: result.complete ? "completed" : "failed",
-        duration,
-      };
-    } catch (error) {
-      this.logger.debug("Task failed");
-      this.logger.debug(error instanceof Error ? error.message : String(error));
-
-      const duration = Date.now() - startTime;
-      return {
-        taskId: chat.sessionId,
-        goal,
-        status: "failed",
-        duration,
-      };
-    }
+  getInferenceEngine(sessionId: string): InferenceEngine | undefined {
+    const session = this.sessions.get(sessionId);
+    return session?.engine;
   }
 
   /**
-   * Shutdown the daemon
+   * End a session
+   */
+  endSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
+
+  /**
+   * Get workspace path
+   */
+  getWorkspacePath(): string {
+    return this.config.workspacePath;
+  }
+
+  /**
+   * Shutdown the workspace context
    */
   async shutdown(): Promise<void> {
-    this.logger.debug("Shutting down daemon...");
+    this.logger.debug("Shutting down workspace context...");
 
     // Stop all sandboxes
     if (this.sandboxManager && this.sandboxManager.hasSandboxes()) {
@@ -338,6 +320,9 @@ coverage
       this.episodicMemory.close();
     }
 
-    this.logger.debug("Goodbye!");
+    // Clear sessions
+    this.sessions.clear();
+
+    this.logger.debug("Workspace context shutdown complete");
   }
 }

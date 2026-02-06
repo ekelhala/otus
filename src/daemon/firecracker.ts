@@ -4,12 +4,15 @@
  */
 
 import { spawn, type Subprocess } from "bun";
-import { unlink, copyFile } from "fs/promises";
+import { unlink, copyFile, readdir } from "fs/promises";
 import { existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { $ } from "bun";
 import { getTapPool, type TapDevice } from "./tap-pool";
+
+/** Track all active temp rootfs files for cleanup on exit */
+const activeTempRootfsFiles = new Set<string>();
 
 /**
  * Find firecracker binary
@@ -36,6 +39,59 @@ export async function findFirecrackerBinary(): Promise<string | null> {
   }
 
   return null;
+}
+
+/**
+ * Clean up orphaned temp rootfs files from previous daemon runs
+ * These can accumulate if the daemon crashes or is killed ungracefully
+ */
+export async function cleanupOrphanedTempRootfs(): Promise<number> {
+  const tmp = tmpdir();
+  let cleanedCount = 0;
+
+  try {
+    const files = await readdir(tmp);
+    const orphanedFiles = files.filter((f) => f.startsWith("firecracker-rootfs-") && f.endsWith(".ext4"));
+
+    for (const file of orphanedFiles) {
+      const filePath = join(tmp, file);
+      // Skip files that are actively tracked by this process
+      if (activeTempRootfsFiles.has(filePath)) {
+        continue;
+      }
+
+      try {
+        await unlink(filePath);
+        cleanedCount++;
+        console.log(`[Firecracker] Cleaned up orphaned temp rootfs: ${file}`);
+      } catch (error) {
+        // File might be in use by another process, skip
+        console.log(`[Firecracker] Could not clean up ${file}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+  } catch (error) {
+    console.log(`[Firecracker] Error scanning for orphaned temp files: ${error instanceof Error ? error.message : error}`);
+  }
+
+  return cleanedCount;
+}
+
+/**
+ * Clean up all temp rootfs files tracked by this process
+ * Call this on graceful shutdown
+ */
+export async function cleanupAllTempRootfs(): Promise<void> {
+  for (const filePath of activeTempRootfsFiles) {
+    try {
+      if (existsSync(filePath)) {
+        await unlink(filePath);
+        console.log(`[Firecracker] Cleaned up temp rootfs: ${filePath}`);
+      }
+    } catch (error) {
+      // Ignore errors during cleanup
+    }
+  }
+  activeTempRootfsFiles.clear();
 }
 
 export interface FirecrackerConfig {
@@ -137,6 +193,7 @@ export class FirecrackerVM {
     // Copy rootfs to temp file to avoid persisting changes
     this.tempRootfsPath = join(tmpdir(), `firecracker-rootfs-${Date.now()}-${process.pid}.ext4`);
     await copyFile(this.config.rootfsPath, this.tempRootfsPath);
+    activeTempRootfsFiles.add(this.tempRootfsPath);
     console.log(`[Firecracker] Using temp rootfs: ${this.tempRootfsPath}`);
 
     // Start Firecracker process
@@ -337,9 +394,11 @@ export class FirecrackerVM {
     if (this.tempRootfsPath) {
       try {
         await unlink(this.tempRootfsPath);
+        activeTempRootfsFiles.delete(this.tempRootfsPath);
         console.log(`[Firecracker] Cleaned up temp rootfs: ${this.tempRootfsPath}`);
       } catch {
         // Ignore if already deleted
+        activeTempRootfsFiles.delete(this.tempRootfsPath);
       }
       this.tempRootfsPath = null;
     }
