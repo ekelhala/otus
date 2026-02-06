@@ -13,7 +13,7 @@ import prompts from "prompts";
 import chalk from "chalk";
 import { WORKSPACE, CREDENTIAL_KEYS, DAEMON, type CredentialKey } from "@shared/constants.ts";
 import { DaemonClient } from "./client.ts";
-import type { InferenceEvent } from "@daemon/inference.ts";
+import type { InferenceEvent } from "@daemon/inference/index.ts";
 import { 
   readCredentials, 
   setCredential, 

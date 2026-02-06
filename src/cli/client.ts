@@ -4,7 +4,7 @@
  */
 
 import { DAEMON } from "@shared/constants.ts";
-import type { InferenceEvent } from "@daemon/inference.ts";
+import type { InferenceEvent } from "@daemon/inference/index.ts";
 
 export interface DaemonHealth {
   status: string;
