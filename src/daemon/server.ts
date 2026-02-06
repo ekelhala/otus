@@ -11,7 +11,7 @@ import { vmPool } from "./vm-pool.ts";
 
 interface InitRequest {
   workspacePath: string;
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
 }
@@ -31,7 +31,7 @@ interface SendMessageRequest {
 interface TaskRequest {
   workspacePath: string;
   goal: string;
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
 }
@@ -181,7 +181,7 @@ export class DaemonServer {
    * Initialize a workspace
    */
   private async handleInit(body: InitRequest): Promise<Response> {
-    const { workspacePath, anthropicApiKey, voyageApiKey, verbose } = body;
+    const { workspacePath, openrouterApiKey, voyageApiKey, verbose } = body;
 
     // Check if already initialized
     if (this.workspaces.has(workspacePath)) {
@@ -194,7 +194,7 @@ export class DaemonServer {
     // Create workspace context
     const context = await WorkspaceContext.create({
       workspacePath,
-      anthropicApiKey,
+      openrouterApiKey,
       voyageApiKey,
       verbose,
     });
@@ -296,14 +296,14 @@ export class DaemonServer {
    * Run a one-shot task with SSE streaming
    */
   private async handleRunTask(body: TaskRequest): Promise<Response> {
-    const { workspacePath, goal, anthropicApiKey, voyageApiKey, verbose } = body;
+    const { workspacePath, goal, openrouterApiKey, voyageApiKey, verbose } = body;
 
     // Create or get workspace context
     let context = this.workspaces.get(workspacePath);
     if (!context) {
       context = await WorkspaceContext.create({
         workspacePath,
-        anthropicApiKey,
+        openrouterApiKey,
         voyageApiKey,
         verbose,
       });

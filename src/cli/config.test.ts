@@ -38,8 +38,8 @@ describe("otus config command", () => {
   });
 
   test("config set with direct value", async () => {
-    const result = await $`bun run src/cli/otus.ts config set anthropic_api_key test-key-123`.text();
-    expect(result).toContain("✓ Set anthropic_api_key");
+    const result = await $`bun run src/cli/otus.ts config set openrouter_api_key test-key-123`.text();
+    expect(result).toContain("✓ Set openrouter_api_key");
     
     // Verify file was created with correct permissions
     const credPath = join(tempHome, ".otus", "credentials.json");
@@ -50,9 +50,9 @@ describe("otus config command", () => {
   });
 
   test("config get shows configured status", async () => {
-    await $`bun run src/cli/otus.ts config set anthropic_api_key test-key-123`.quiet();
+    await $`bun run src/cli/otus.ts config set openrouter_api_key test-key-123`.quiet();
     
-    const result = await $`bun run src/cli/otus.ts config get anthropic_api_key`.text();
+    const result = await $`bun run src/cli/otus.ts config get openrouter_api_key`.text();
     expect(result).toContain("***configured***");
     expect(result).not.toContain("test-key-123"); // Never reveals actual value
   });
@@ -63,24 +63,24 @@ describe("otus config command", () => {
   });
 
   test("config list shows all keys", async () => {
-    await $`bun run src/cli/otus.ts config set anthropic_api_key test-key-123`.quiet();
+    await $`bun run src/cli/otus.ts config set openrouter_api_key test-key-123`.quiet();
     
     const result = await $`bun run src/cli/otus.ts config list`.text();
-    expect(result).toContain("anthropic_api_key");
+    expect(result).toContain("openrouter_api_key");
     expect(result).toContain("voyage_api_key");
     expect(result).toContain("✓ configured");
     expect(result).toContain("✗ not set");
   });
 
   test("config unset removes key", async () => {
-    await $`bun run src/cli/otus.ts config set anthropic_api_key test-key-123`.quiet();
+    await $`bun run src/cli/otus.ts config set openrouter_api_key test-key-123`.quiet();
     
-    const setResult = await $`bun run src/cli/otus.ts config get anthropic_api_key`.text();
+    const setResult = await $`bun run src/cli/otus.ts config get openrouter_api_key`.text();
     expect(setResult).toContain("***configured***");
     
-    await $`bun run src/cli/otus.ts config unset anthropic_api_key`.quiet();
+    await $`bun run src/cli/otus.ts config unset openrouter_api_key`.quiet();
     
-    const unsetResult = await $`bun run src/cli/otus.ts config get anthropic_api_key`.text();
+    const unsetResult = await $`bun run src/cli/otus.ts config get openrouter_api_key`.text();
     expect(unsetResult).toContain("not set");
   });
 
@@ -104,11 +104,11 @@ describe("otus config command", () => {
   });
 
   test("multiple keys can be set and preserved", async () => {
-    await $`bun run src/cli/otus.ts config set anthropic_api_key key1`.quiet();
+    await $`bun run src/cli/otus.ts config set openrouter_api_key key1`.quiet();
     await $`bun run src/cli/otus.ts config set voyage_api_key key2`.quiet();
     
     const list = await $`bun run src/cli/otus.ts config list`.text();
-    expect(list).toContain("anthropic_api_key    ✓ configured");
+    expect(list).toContain("openrouter_api_key    ✓ configured");
     expect(list).toContain("voyage_api_key       ✓ configured");
   });
 });

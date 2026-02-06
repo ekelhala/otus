@@ -171,15 +171,27 @@ export const EMBEDDINGS = {
 } as const;
 
 /**
- * LLM Configuration
+ * LLM Configuration (via OpenRouter)
  */
 export const LLM = {
-  /** Anthropic model */
-  MODEL: "claude-sonnet-4-5-20250929",
+  /** OpenRouter model identifier */
+  MODEL: "anthropic/claude-sonnet-4-5-20250929",
   /** Maximum tokens for completion */
   MAX_TOKENS: 4096,
   /** Number of RAG results to include in context */
   RAG_RESULTS: 10,
+} as const;
+
+/**
+ * OpenRouter Configuration
+ */
+export const OPENROUTER = {
+  /** OpenRouter API base URL */
+  BASE_URL: "https://openrouter.ai/api/v1",
+  /** App name for OpenRouter analytics */
+  APP_NAME: "Otus",
+  /** App URL for OpenRouter analytics */
+  APP_URL: "https://github.com/otus-ai/otus",
 } as const;
 
 /**
@@ -206,7 +218,7 @@ export const DAEMON = {
  * Supported credential key names
  */
 export const CREDENTIAL_KEYS = [
-  "anthropic_api_key",
+  "openrouter_api_key",
   "voyage_api_key",
 ] as const;
 

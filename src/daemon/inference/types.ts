@@ -2,7 +2,6 @@
  * Types for the inference engine
  */
 
-import type Anthropic from "@anthropic-ai/sdk";
 import type { SandboxManager } from "../sandbox.ts";
 import type { EpisodicMemory } from "../memory/episodic.ts";
 import type { SemanticMemory } from "../memory/semantic.ts";
@@ -41,10 +40,19 @@ export interface IterationResult {
 }
 
 /**
+ * Tool result for OpenAI API format
+ */
+export interface ToolResultMessage {
+  role: "tool";
+  tool_call_id: string;
+  content: string;
+}
+
+/**
  * Result of executing a single tool call
  */
 export interface ToolCallResult {
-  toolResult: Anthropic.ToolResultBlockParam;
+  toolResult: ToolResultMessage;
   isTaskComplete: boolean;
   summary?: string;
 }

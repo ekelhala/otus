@@ -1,15 +1,17 @@
 /**
  * Inference Engine
- * Manages the ReAct loop with Claude and tool execution
+ * Manages the ReAct loop with LLM and tool execution via OpenRouter
  */
 
-import Anthropic from "@anthropic-ai/sdk";
-import { LLM, EXECUTION } from "@shared/constants.ts";
+import OpenAI from "openai";
+import type { ChatCompletionMessageFunctionToolCall } from "openai/resources/chat/completions";
+import { LLM, EXECUTION, OPENROUTER } from "@shared/constants.ts";
 import type {
   InferenceEvent,
   InferenceEngineConfig,
   IterationResult,
   ToolCallResult,
+  ToolResultMessage,
 } from "./types.ts";
 import { tools } from "./tools.ts";
 import type { ToolName } from "./tools.ts";
@@ -20,18 +22,26 @@ import { buildInitialPrompt, ACTION_PROMPT, SYSTEM_PROMPT } from "./prompts.ts";
  * Inference Engine implementing the ReAct loop
  */
 export class InferenceEngine {
-  private readonly client: Anthropic;
+  private readonly client: OpenAI;
   private readonly toolHandlers: ToolHandlers;
   private readonly episodicMemory: InferenceEngineConfig["episodicMemory"];
   private readonly logger: InferenceEngineConfig["logger"];
 
   /** Conversation history for interactive mode */
-  private messages: Anthropic.MessageParam[] = [];
+  private messages: OpenAI.ChatCompletionMessageParam[] = [];
   /** Current session ID */
   private sessionId: string = "";
 
   constructor(config: InferenceEngineConfig) {
-    this.client = new Anthropic({ apiKey: config.apiKey });
+    // Configure OpenAI client to use OpenRouter
+    this.client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: OPENROUTER.BASE_URL,
+      defaultHeaders: {
+        "HTTP-Referer": OPENROUTER.APP_URL,
+        "X-Title": OPENROUTER.APP_NAME,
+      },
+    });
     this.episodicMemory = config.episodicMemory;
     this.logger = config.logger;
 
@@ -116,34 +126,31 @@ export class InferenceEngine {
     const fullMessage =
       this.messages.length === 0 ? buildInitialPrompt(message) : message;
 
-    // Check for pending tool calls and combine with user message if needed
+    // Check for pending tool calls and add placeholder results first
     const pendingToolResults = this.getPendingToolResults();
 
     if (pendingToolResults.length > 0) {
-      // Combine tool results and user text in a single message
-      this.messages.push({
-        role: "user",
-        content: [
-          ...pendingToolResults,
-          { type: "text", text: fullMessage },
-        ],
-      });
+      // Add tool results for incomplete tool calls
+      for (const toolResult of pendingToolResults) {
+        this.messages.push(toolResult);
+      }
       this.logger.debug(
         `Completed ${pendingToolResults.length} pending tool call(s) due to user interruption`
       );
-    } else {
-      this.messages.push({
-        role: "user",
-        content: fullMessage,
-      });
     }
+
+    // Add the user message
+    this.messages.push({
+      role: "user",
+      content: fullMessage,
+    });
   }
 
   /**
-   * Check if the last assistant message has tool_use blocks without corresponding tool_results
-   * Returns placeholder tool_results to maintain valid conversation structure
+   * Check if the last assistant message has tool_calls without corresponding tool results
+   * Returns placeholder tool results to maintain valid conversation structure
    */
-  private getPendingToolResults(): Anthropic.ToolResultBlockParam[] {
+  private getPendingToolResults(): ToolResultMessage[] {
     if (this.messages.length === 0) return [];
 
     const lastMessage = this.messages.at(-1);
@@ -151,23 +158,15 @@ export class InferenceEngine {
     // Only check if last message is from assistant
     if (!lastMessage || lastMessage.role !== "assistant") return [];
     
-    // Check if the assistant message contains tool_use blocks
-    const content = lastMessage.content;
-    if (!Array.isArray(content)) return [];
+    // Check if the assistant message contains tool_calls
+    const assistantMsg = lastMessage as OpenAI.ChatCompletionAssistantMessageParam;
+    if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) return [];
 
-    const toolUseBlocks = content.filter(
-      (block): block is Anthropic.ToolUseBlock => 
-        typeof block === "object" && "type" in block && block.type === "tool_use"
-    );
-
-    if (toolUseBlocks.length === 0) return [];
-
-    // Return placeholder tool_results for each pending tool call
-    return toolUseBlocks.map((toolUse) => ({
-      type: "tool_result" as const,
-      tool_use_id: toolUse.id,
+    // Return placeholder tool results for each pending tool call
+    return assistantMsg.tool_calls.map((toolCall) => ({
+      role: "tool" as const,
+      tool_call_id: toolCall.id,
       content: "Operation interrupted by user",
-      is_error: true,
     }));
   }
 
@@ -185,10 +184,10 @@ export class InferenceEngine {
       context: "Processing user request",
     });
 
-    // Call Claude and get response
-    let response: Anthropic.Message;
+    // Call model and get response
+    let response: OpenAI.ChatCompletion;
     try {
-      response = await this.callClaude();
+      response = await this.callModel();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.debug(`API call failed: ${errorMessage}`);
@@ -197,14 +196,17 @@ export class InferenceEngine {
       return { complete: true, summary: `Error: ${errorMessage}` };
     }
 
+    const choice = response.choices[0];
+    if (!choice?.message) {
+      yield { type: "error", message: "No response from model" };
+      return { complete: true, summary: "Error: No response from model" };
+    }
+
     // Add assistant response to messages
-    this.messages.push({
-      role: "assistant",
-      content: response.content,
-    });
+    this.messages.push(choice.message);
 
     // Process response
-    const { toolCalls, textContent } = this.parseResponse(response);
+    const { toolCalls, textContent } = this.parseResponse(choice.message);
     this.logger.debug(`Parsed response: ${toolCalls.length} tool calls, text length: ${textContent.length}`);
 
     // Yield thinking text if present
@@ -227,57 +229,45 @@ export class InferenceEngine {
       return result;
     }
 
-    // No tool calls - prompt Claude to take action or call task_complete
+    // No tool calls - prompt model to take action or call task_complete
     // Only task_complete tool should signal actual completion
     this.promptForAction();
     return { complete: false };
   }
 
   /**
-   * Call Claude API with current messages
+   * Call model API with current messages
    */
-  private async callClaude(): Promise<Anthropic.Message> {
-    this.logger.debug(`Calling Claude API with ${this.messages.length} messages`);
+  private async callModel(): Promise<OpenAI.ChatCompletion> {
+    this.logger.debug(`Calling model API with ${this.messages.length} messages`);
     
-    const response = await this.client.messages.create(
+    const response = await this.client.chat.completions.create(
       {
         model: LLM.MODEL,
         max_tokens: LLM.MAX_TOKENS,
-        system: [
+        messages: [
           {
-            type: "text",
-            text: SYSTEM_PROMPT,
-            cache_control: { type: "ephemeral" },
+            role: "system",
+            content: SYSTEM_PROMPT,
           },
+          ...this.messages,
         ],
-        messages: this.messages,
-        tools: tools.map((tool, index) => ({
-          ...tool,
-          // Cache the last tool in the list (contains all tool definitions)
-          ...(index === tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {}),
-        })),
+        tools: tools,
+        tool_choice: "auto",
       },
       {
         timeout: EXECUTION.API_TIMEOUT_MS,
       }
     );
     
-    // Log cache usage if available
+    // Log usage if available
     if (response.usage) {
-      const cacheInfo = [];
-      if (response.usage.cache_creation_input_tokens) {
-        cacheInfo.push(`cache_write=${response.usage.cache_creation_input_tokens}`);
-      }
-      if (response.usage.cache_read_input_tokens) {
-        cacheInfo.push(`cache_read=${response.usage.cache_read_input_tokens}`);
-      }
-      const cacheStr = cacheInfo.length > 0 ? `, ${cacheInfo.join(", ")}` : "";
       this.logger.debug(
-        `Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}, ` +
-        `input_tokens=${response.usage.input_tokens}, output_tokens=${response.usage.output_tokens}${cacheStr}`
+        `Model API response: finish_reason=${response.choices[0]?.finish_reason}, ` +
+        `prompt_tokens=${response.usage.prompt_tokens}, completion_tokens=${response.usage.completion_tokens}`
       );
     } else {
-      this.logger.debug(`Claude API response: stop_reason=${response.stop_reason}, content_blocks=${response.content.length}`);
+      this.logger.debug(`Model API response: finish_reason=${response.choices[0]?.finish_reason}`);
     }
     
     return response;
@@ -287,18 +277,18 @@ export class InferenceEngine {
    * Execute tool calls and add results to messages
    */
   private async *executeToolCalls(
-    toolCalls: Anthropic.ToolUseBlock[],
+    toolCalls: ChatCompletionMessageFunctionToolCall[],
     iteration: number
   ): AsyncGenerator<InferenceEvent, IterationResult> {
     this.logger.debug(`executeToolCalls started with ${toolCalls.length} calls`);
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    const toolResults: ToolResultMessage[] = [];
     let turnComplete = false;
     let completionSummary: string | undefined;
 
     for (const toolCall of toolCalls) {
-      this.logger.debug(`About to delegate to executeSingleToolCall for ${toolCall.name}`);
+      this.logger.debug(`About to delegate to executeSingleToolCall for ${toolCall.function.name}`);
       const result = yield* this.executeSingleToolCall(toolCall, iteration);
-      this.logger.debug(`executeSingleToolCall returned for ${toolCall.name}`);
+      this.logger.debug(`executeSingleToolCall returned for ${toolCall.function.name}`);
       toolResults.push(result.toolResult);
 
       if (result.isTaskComplete) {
@@ -308,10 +298,9 @@ export class InferenceEngine {
     }
 
     // Add all tool results to messages
-    this.messages.push({
-      role: "user",
-      content: toolResults,
-    });
+    for (const toolResult of toolResults) {
+      this.messages.push(toolResult);
+    }
 
     return { complete: turnComplete, summary: completionSummary };
   }
@@ -320,50 +309,59 @@ export class InferenceEngine {
    * Execute a single tool call
    */
   private async *executeSingleToolCall(
-    toolCall: Anthropic.ToolUseBlock,
+    toolCall: ChatCompletionMessageFunctionToolCall,
     iteration: number
   ): AsyncGenerator<InferenceEvent, ToolCallResult> {
-    this.logger.debug(`Executing tool: ${toolCall.name}`);
+    const toolName = toolCall.function.name;
+    let toolInput: unknown;
+    
     try {
-      this.logger.debug(`Yielding tool_call event for ${toolCall.name}`);
-      yield { type: "tool_call", name: toolCall.name, input: toolCall.input };
+      toolInput = JSON.parse(toolCall.function.arguments);
+    } catch {
+      toolInput = {};
+    }
+
+    this.logger.debug(`Executing tool: ${toolName}`);
+    try {
+      this.logger.debug(`Yielding tool_call event for ${toolName}`);
+      yield { type: "tool_call", name: toolName, input: toolInput };
       this.logger.debug(`Yielded tool_call event, now logging`);
-      this.logger.tool(toolCall.name, toolCall.input);
+      this.logger.tool(toolName, toolInput);
 
       // Log action
       this.episodicMemory.logEvent(this.sessionId, "act", {
         iteration,
-        tool: toolCall.name,
-        input: toolCall.input,
+        tool: toolName,
+        input: toolInput,
       });
 
       const result = await this.toolHandlers.execute(
-        toolCall.name as ToolName,
-        toolCall.input,
+        toolName as ToolName,
+        toolInput,
         this.sessionId
       );
 
       // Check if task is complete
-      const isTaskComplete = toolCall.name === "task_complete";
-      const summary = isTaskComplete ? (toolCall.input as any).summary : undefined;
+      const isTaskComplete = toolName === "task_complete";
+      const summary = isTaskComplete ? (toolInput as any).summary : undefined;
 
       if (isTaskComplete) {
         this.logger.debug(`Turn complete: ${summary}`);
       }
 
-      yield { type: "tool_result", name: toolCall.name, result, isError: false };
+      yield { type: "tool_result", name: toolName, result, isError: false };
 
       // Log observation
       this.episodicMemory.logEvent(this.sessionId, "observe", {
         iteration,
-        tool: toolCall.name,
+        tool: toolName,
         result,
       });
 
       return {
         toolResult: {
-          type: "tool_result",
-          tool_use_id: toolCall.id,
+          role: "tool",
+          tool_call_id: toolCall.id,
           content: typeof result === "string" ? result : JSON.stringify(result),
         },
         isTaskComplete,
@@ -373,20 +371,19 @@ export class InferenceEngine {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.debug(`Tool Error: ${errorMessage}`);
 
-      yield { type: "tool_result", name: toolCall.name, result: errorMessage, isError: true };
+      yield { type: "tool_result", name: toolName, result: errorMessage, isError: true };
 
       this.episodicMemory.logEvent(this.sessionId, "observe", {
         iteration,
-        tool: toolCall.name,
+        tool: toolName,
         error: errorMessage,
       });
 
       return {
         toolResult: {
-          type: "tool_result",
-          tool_use_id: toolCall.id,
+          role: "tool",
+          tool_call_id: toolCall.id,
           content: `Error: ${errorMessage}`,
-          is_error: true,
         },
         isTaskComplete: false,
       };
@@ -394,7 +391,7 @@ export class InferenceEngine {
   }
 
   /**
-   * Prompt Claude to take an action when it didn't make tool calls
+   * Prompt model to take an action when it didn't make tool calls
    */
   private promptForAction(): void {
     this.logger.debug("No tool calls made, prompting for action");
@@ -405,22 +402,17 @@ export class InferenceEngine {
   }
 
   /**
-   * Parse Claude's response into text and tool calls
+   * Parse model response into text and tool calls
    */
-  private parseResponse(response: Anthropic.Message): {
-    toolCalls: Anthropic.ToolUseBlock[];
+  private parseResponse(message: OpenAI.ChatCompletionMessage): {
+    toolCalls: ChatCompletionMessageFunctionToolCall[];
     textContent: string;
   } {
-    const toolCalls: Anthropic.ToolUseBlock[] = [];
-    let textContent = "";
-
-    for (const content of response.content) {
-      if (content.type === "text") {
-        textContent += content.text;
-      } else if (content.type === "tool_use") {
-        toolCalls.push(content);
-      }
-    }
+    // Filter to only function tool calls (the standard type)
+    const toolCalls = (message.tool_calls || []).filter(
+      (tc): tc is ChatCompletionMessageFunctionToolCall => tc.type === "function"
+    );
+    const textContent = message.content || "";
 
     return { toolCalls, textContent: textContent.trim() };
   }

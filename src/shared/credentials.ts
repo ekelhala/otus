@@ -12,7 +12,7 @@ import { GLOBAL_CONFIG, CREDENTIAL_KEYS, type CredentialKey } from "./constants.
  * Credentials stored in the config file
  */
 export interface Credentials {
-  anthropic_api_key?: string;
+  openrouter_api_key?: string;
   voyage_api_key?: string;
 }
 

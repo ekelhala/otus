@@ -21,7 +21,7 @@ export interface PrerequisitesResult {
 
 export interface InitOptions {
   workspacePath: string;
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
 }
@@ -33,7 +33,7 @@ export interface SessionOptions {
 export interface TaskOptions {
   workspacePath: string;
   goal: string;
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
 }

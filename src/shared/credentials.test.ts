@@ -123,12 +123,12 @@ describe("Credentials Module", () => {
       
       mkdirSync(configDir, { recursive: true });
       writeFileSync(credPath, JSON.stringify({
-        anthropic_api_key: "sk-ant-test123",
+        openrouter_api_key: "sk-or-test123",
         voyage_api_key: "pa-test456",
       }), { mode: 0o600 });
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBe("sk-ant-test123");
+      expect(creds.openrouter_api_key).toBe("sk-or-test123");
       expect(creds.voyage_api_key).toBe("pa-test456");
     });
 
@@ -138,13 +138,13 @@ describe("Credentials Module", () => {
       
       mkdirSync(configDir, { recursive: true });
       writeFileSync(credPath, JSON.stringify({
-        anthropic_api_key: "sk-ant-test123",
+        openrouter_api_key: "sk-or-test123",
         unknown_key: "should-be-ignored",
         voyage_api_key: "pa-test456",
       }), { mode: 0o600 });
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBe("sk-ant-test123");
+      expect(creds.openrouter_api_key).toBe("sk-or-test123");
       expect(creds.voyage_api_key).toBe("pa-test456");
       expect("unknown_key" in creds).toBe(false);
     });
@@ -164,7 +164,7 @@ describe("Credentials Module", () => {
   describe("writeCredentials", () => {
     test("creates directory and file with secure permissions", () => {
       const testCreds = {
-        anthropic_api_key: "sk-ant-test123",
+        openrouter_api_key: "sk-or-test123",
         voyage_api_key: "pa-test456",
       };
       
@@ -187,93 +187,93 @@ describe("Credentials Module", () => {
     });
 
     test("overwrites existing file", () => {
-      credentials.writeCredentials({ anthropic_api_key: "old-key" });
+      credentials.writeCredentials({ openrouter_api_key: "old-key" });
       credentials.writeCredentials({ voyage_api_key: "new-key" });
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBeUndefined();
+      expect(creds.openrouter_api_key).toBeUndefined();
       expect(creds.voyage_api_key).toBe("new-key");
     });
   });
 
   describe("setCredential", () => {
     test("sets a single credential", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBe("sk-ant-test123");
+      expect(creds.openrouter_api_key).toBe("sk-or-test123");
     });
 
     test("updates existing credential", () => {
-      credentials.setCredential("anthropic_api_key", "old-key");
-      credentials.setCredential("anthropic_api_key", "new-key");
+      credentials.setCredential("openrouter_api_key", "old-key");
+      credentials.setCredential("openrouter_api_key", "new-key");
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBe("new-key");
+      expect(creds.openrouter_api_key).toBe("new-key");
     });
 
     test("preserves other credentials", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       credentials.setCredential("voyage_api_key", "pa-test456");
       
       const creds = credentials.readCredentials();
-      expect(creds.anthropic_api_key).toBe("sk-ant-test123");
+      expect(creds.openrouter_api_key).toBe("sk-or-test123");
       expect(creds.voyage_api_key).toBe("pa-test456");
     });
   });
 
   describe("getCredential", () => {
     test("returns undefined for non-existent credential", () => {
-      const value = credentials.getCredential("anthropic_api_key");
+      const value = credentials.getCredential("openrouter_api_key");
       expect(value).toBeUndefined();
     });
 
     test("returns credential value", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       
-      const value = credentials.getCredential("anthropic_api_key");
-      expect(value).toBe("sk-ant-test123");
+      const value = credentials.getCredential("openrouter_api_key");
+      expect(value).toBe("sk-or-test123");
     });
   });
 
   describe("unsetCredential", () => {
     test("removes a credential", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(true);
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(true);
       
-      credentials.unsetCredential("anthropic_api_key");
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(false);
+      credentials.unsetCredential("openrouter_api_key");
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(false);
     });
 
     test("preserves other credentials", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       credentials.setCredential("voyage_api_key", "pa-test456");
       
-      credentials.unsetCredential("anthropic_api_key");
+      credentials.unsetCredential("openrouter_api_key");
       
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(false);
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(false);
       expect(credentials.hasCredential("voyage_api_key")).toBe(true);
     });
 
     test("does nothing if credential doesn't exist", () => {
-      credentials.unsetCredential("anthropic_api_key");
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(false);
+      credentials.unsetCredential("openrouter_api_key");
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(false);
     });
   });
 
   describe("hasCredential", () => {
     test("returns false for non-existent credential", () => {
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(false);
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(false);
     });
 
     test("returns true for existing credential", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(true);
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(true);
     });
 
     test("returns false for empty string credential", () => {
-      credentials.setCredential("anthropic_api_key", "");
-      expect(credentials.hasCredential("anthropic_api_key")).toBe(false);
+      credentials.setCredential("openrouter_api_key", "");
+      expect(credentials.hasCredential("openrouter_api_key")).toBe(false);
     });
   });
 
@@ -284,21 +284,21 @@ describe("Credentials Module", () => {
     });
 
     test("returns list of configured keys", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       credentials.setCredential("voyage_api_key", "pa-test456");
       
       const keys = credentials.getConfiguredKeys();
-      expect(keys).toContain("anthropic_api_key");
+      expect(keys).toContain("openrouter_api_key");
       expect(keys).toContain("voyage_api_key");
       expect(keys).toHaveLength(2);
     });
 
     test("excludes empty credentials", () => {
-      credentials.setCredential("anthropic_api_key", "sk-ant-test123");
+      credentials.setCredential("openrouter_api_key", "sk-or-test123");
       credentials.setCredential("voyage_api_key", "");
       
       const keys = credentials.getConfiguredKeys();
-      expect(keys).toEqual(["anthropic_api_key"]);
+      expect(keys).toEqual(["openrouter_api_key"]);
     });
   });
 });

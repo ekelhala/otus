@@ -18,7 +18,7 @@ import { initLogger, getLogger, type Logger } from "@shared/logger.ts";
 
 export interface WorkspaceConfig {
   workspacePath: string;
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
   otusIgnoreFile?: string;
   verbose?: boolean;
@@ -249,7 +249,7 @@ coverage
 
     // Initialize inference engine
     this.inferenceEngine = new InferenceEngine({
-      apiKey: this.config.anthropicApiKey,
+      apiKey: this.config.openrouterApiKey,
       sandboxManager: this.sandboxManager,
       episodicMemory: this.episodicMemory,
       semanticMemory: this.semanticMemory,

@@ -32,24 +32,24 @@ const program = new Command();
  * Priority: environment variables > ~/.otus/credentials.json
  */
 function getApiKeys(workspacePath: string): {
-  anthropicApiKey: string;
+  openrouterApiKey: string;
   voyageApiKey: string;
 } {
   // Try environment variables first
-  let anthropicApiKey =
-    process.env.ANTHROPIC_API_KEY ||
-    process.env.ANTHROPIC_KEY;
+  let openrouterApiKey =
+    process.env.OPENROUTER_API_KEY ||
+    process.env.OPENROUTER_KEY;
   
   let voyageApiKey =
     process.env.VOYAGE_API_KEY ||
     process.env.VOYAGE_KEY;
 
   // Fall back to credentials file
-  if (!anthropicApiKey || !voyageApiKey) {
+  if (!openrouterApiKey || !voyageApiKey) {
     const credentials = readCredentials();
     
-    if (!anthropicApiKey && credentials.anthropic_api_key) {
-      anthropicApiKey = credentials.anthropic_api_key;
+    if (!openrouterApiKey && credentials.openrouter_api_key) {
+      openrouterApiKey = credentials.openrouter_api_key;
     }
     
     if (!voyageApiKey && credentials.voyage_api_key) {
@@ -58,11 +58,11 @@ function getApiKeys(workspacePath: string): {
   }
 
   // Validate that we have both keys
-  if (!anthropicApiKey) {
-    console.error(chalk.red("Error: ANTHROPIC_API_KEY not configured"));
+  if (!openrouterApiKey) {
+    console.error(chalk.red("Error: OPENROUTER_API_KEY not configured"));
     console.error("\nSet it using one of:");
-    console.error("  • otus config set anthropic_api_key");
-    console.error("  • export ANTHROPIC_API_KEY='your-key'");
+    console.error("  • otus config set openrouter_api_key");
+    console.error("  • export OPENROUTER_API_KEY='your-key'");
     process.exit(1);
   }
 
@@ -74,7 +74,7 @@ function getApiKeys(workspacePath: string): {
     process.exit(1);
   }
 
-  return { anthropicApiKey, voyageApiKey };
+  return { openrouterApiKey, voyageApiKey };
 }
 
 /**
@@ -690,7 +690,7 @@ program
         console.log(chalk.green("✓ All prerequisites met! You're ready to use Otus.\n"));
         console.log(chalk.bold("Next steps:"));
         console.log("  1. Set API keys:");
-        console.log(chalk.gray("     otus config set anthropic_api_key"));
+        console.log(chalk.gray("     otus config set openrouter_api_key"));
         console.log(chalk.gray("     otus config set voyage_api_key"));
         console.log("  2. Start daemon: " + chalk.cyan("otus daemon start"));
         console.log("  3. Initialize workspace: " + chalk.cyan("otus init"));
