@@ -174,8 +174,6 @@ export const EMBEDDINGS = {
  * LLM Configuration (via OpenRouter)
  */
 export const LLM = {
-  /** OpenRouter model identifier */
-  MODEL: "google/gemini-3-flash-preview",
   /** Maximum tokens for completion */
   MAX_TOKENS: 4096,
   /** Number of RAG results to include in context */
@@ -220,6 +218,7 @@ export const DAEMON = {
 export const CREDENTIAL_KEYS = [
   "openrouter_api_key",
   "voyage_api_key",
+  "model",
 ] as const;
 
 export type CredentialKey = typeof CREDENTIAL_KEYS[number];

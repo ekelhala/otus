@@ -26,6 +26,7 @@ export class InferenceEngine {
   private readonly toolHandlers: ToolHandlers;
   private readonly episodicMemory: InferenceEngineConfig["episodicMemory"];
   private readonly logger: InferenceEngineConfig["logger"];
+  private readonly model: string;
 
   /** Conversation history for interactive mode */
   private messages: OpenAI.ChatCompletionMessageParam[] = [];
@@ -44,11 +45,13 @@ export class InferenceEngine {
     });
     this.episodicMemory = config.episodicMemory;
     this.logger = config.logger;
+    this.model = config.model || "google/gemini-2.5-flash";
 
     this.toolHandlers = new ToolHandlers({
       sandboxManager: config.sandboxManager,
       episodicMemory: config.episodicMemory,
       semanticMemory: config.semanticMemory,
+      workspacePath: config.workspacePath,
       logger: config.logger,
     });
   }
@@ -63,8 +66,15 @@ export class InferenceEngine {
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
 
-    this.logger.debug(`Started session: ${this.sessionId}`);
+    this.logger.debug(`Started session: ${this.sessionId} (model: ${this.model})`);
     return this.sessionId;
+  }
+
+  /**
+   * Get the model identifier being used
+   */
+  getModel(): string {
+    return this.model;
   }
 
   /**
@@ -202,12 +212,17 @@ export class InferenceEngine {
       return { complete: true, summary: "Error: No response from model" };
     }
 
-    // Add assistant response to messages
-    this.messages.push(choice.message);
-
-    // Process response
+    // Process response before deciding what to persist.
+    // Important: free-form assistant text (without tool calls) can self-steer later iterations.
+    // We treat it as transient and do not add it to conversation history.
     const { toolCalls, textContent } = this.parseResponse(choice.message);
     this.logger.debug(`Parsed response: ${toolCalls.length} tool calls, text length: ${textContent.length}`);
+
+    // Only persist assistant messages that actually contain tool calls.
+    // This keeps the conversation grounded in user intent and tool observations.
+    if (toolCalls.length > 0) {
+      this.messages.push(choice.message);
+    }
 
     // Yield thinking text if present
     if (textContent) {
@@ -243,7 +258,7 @@ export class InferenceEngine {
     
     const response = await this.client.chat.completions.create(
       {
-        model: LLM.MODEL,
+        model: this.model,
         max_tokens: LLM.MAX_TOKENS,
         messages: [
           {

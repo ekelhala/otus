@@ -24,18 +24,11 @@ export interface InitOptions {
   openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
+  model?: string;
 }
 
 export interface SessionOptions {
   workspacePath: string;
-}
-
-export interface TaskOptions {
-  workspacePath: string;
-  goal: string;
-  openrouterApiKey: string;
-  voyageApiKey: string;
-  verbose?: boolean;
 }
 
 /**
@@ -78,14 +71,14 @@ export class DaemonClient {
   /**
    * Create a new chat session
    */
-  async createSession(options: SessionOptions): Promise<string> {
+  async createSession(options: SessionOptions): Promise<{ sessionId: string; model: string }> {
     const response = await this.request("POST", "/sessions", options);
     if (!response.ok) {
       const error = await response.json() as any;
       throw new Error(error.error || "Failed to create session");
     }
     const result = await response.json() as any;
-    return result.sessionId;
+    return { sessionId: result.sessionId, model: result.model };
   }
 
   /**
@@ -164,74 +157,6 @@ export class DaemonClient {
     if (!response.ok) {
       const error = await response.json() as any;
       throw new Error(error.error || "Failed to end session");
-    }
-  }
-
-  /**
-   * Run a one-shot task with streaming
-   */
-  async *runTask(options: TaskOptions): AsyncGenerator<InferenceEvent> {
-    const response = await this.request("POST", "/tasks", options);
-    
-    if (!response.ok) {
-      const error = await response.json() as any;
-      throw new Error(error.error || "Failed to run task");
-    }
-
-    if (!response.body) {
-      throw new Error("No response body");
-    }
-
-    // Parse SSE stream
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-        
-        // Process complete SSE messages
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || ""; // Keep incomplete message in buffer
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6); // Remove "data: " prefix
-            try {
-              const event = JSON.parse(data) as InferenceEvent;
-              // Don't yield internal stream_end events
-              if (event.type !== "stream_end") {
-                yield event;
-              }
-            } catch (error) {
-              console.error("Failed to parse SSE event:", data, error);
-            }
-          }
-        }
-      }
-    } catch (error) {
-      // Log connection errors for debugging
-      if (error instanceof Error) {
-        if (error.message.includes("socket connection was closed")) {
-          console.error("[Client] Connection to daemon was closed unexpectedly (runTask)");
-          return; // Exit the generator gracefully
-        }
-        console.error(`[Client] Stream error: ${error.message}`);
-      }
-      throw error;
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // Ignore errors when releasing lock on closed stream
-      }
     }
   }
 

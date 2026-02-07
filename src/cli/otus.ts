@@ -34,28 +34,20 @@ const program = new Command();
 function getApiKeys(workspacePath: string): {
   openrouterApiKey: string;
   voyageApiKey: string;
+  model?: string;
 } {
-  // Try environment variables first
-  let openrouterApiKey =
-    process.env.OPENROUTER_API_KEY ||
-    process.env.OPENROUTER_KEY;
-  
-  let voyageApiKey =
-    process.env.VOYAGE_API_KEY ||
-    process.env.VOYAGE_KEY;
+  const credentials = readCredentials();
 
-  // Fall back to credentials file
-  if (!openrouterApiKey || !voyageApiKey) {
-    const credentials = readCredentials();
-    
-    if (!openrouterApiKey && credentials.openrouter_api_key) {
-      openrouterApiKey = credentials.openrouter_api_key;
-    }
-    
-    if (!voyageApiKey && credentials.voyage_api_key) {
-      voyageApiKey = credentials.voyage_api_key;
-    }
-  }
+  // Try environment variables first, fall back to credentials file
+  const openrouterApiKey =
+    process.env.OPENROUTER_API_KEY ||
+    process.env.OPENROUTER_KEY ||
+    credentials.openrouter_api_key;
+  
+  const voyageApiKey =
+    process.env.VOYAGE_API_KEY ||
+    process.env.VOYAGE_KEY ||
+    credentials.voyage_api_key;
 
   // Validate that we have both keys
   if (!openrouterApiKey) {
@@ -74,7 +66,11 @@ function getApiKeys(workspacePath: string): {
     process.exit(1);
   }
 
-  return { openrouterApiKey, voyageApiKey };
+  return {
+    openrouterApiKey,
+    voyageApiKey,
+    model: credentials.model || undefined,
+  };
 }
 
 /**
@@ -461,11 +457,12 @@ program
 
       // Start chat session
       logger.startSpinner("Creating session...");
-      const sessionId = await client.createSession({ workspacePath });
+      const { sessionId, model } = await client.createSession({ workspacePath });
       logger.succeedSpinner("Session created");
 
       console.log("\n" + chalk.cyan("═".repeat(60)));
       console.log(chalk.bold.cyan("Otus Interactive Session"));
+      console.log(chalk.gray(`Model: ${model}`));
       console.log(chalk.gray("Type your requests. Press Ctrl+C to exit."));
       console.log(chalk.cyan("═".repeat(60)) + "\n");
 
@@ -541,97 +538,6 @@ program
 
       rl.close();
       process.exit(0);
-    } catch (error) {
-      console.error("\n✗ Fatal error:", error);
-      process.exit(1);
-    }
-  });
-
-/**
- * otus do "<task>"
- * Single task execution (non-interactive)
- */
-program
-  .command("do")
-  .description("Execute a single task autonomously (non-interactive)")
-  .argument("<goal>", "Task description or goal")
-  .option("-d, --dir <path>", "Workspace directory", process.cwd())
-  .option("-v, --verbose", "Show detailed debug output")
-  .option("--skip-checks", "Skip prerequisite checks (not recommended)")
-  .action(async (goal, options) => {
-    const logger = initLogger(options.verbose);
-    const workspacePath = resolve(options.dir);
-
-    if (!isInitialized(workspacePath)) {
-      logger.error("Workspace not initialized");
-      console.error('Run "otus init" first');
-      process.exit(1);
-    }
-
-    // Check if daemon is running
-    if (!(await isDaemonRunning())) {
-      logger.error("Daemon is not running");
-      console.error('Run "otus daemon start" first');
-      process.exit(1);
-    }
-
-    const apiKeys = getApiKeys(workspacePath);
-    const client = new DaemonClient();
-
-    try {
-      // Check prerequisites (unless skipped)
-      if (!options.skipChecks) {
-        logger.startSpinner("Checking prerequisites...");
-        const check = await client.checkPrerequisites(workspacePath);
-        
-        if (!check.ok) {
-          logger.failSpinner("Missing prerequisites");
-          for (const issue of check.issues) {
-            logger.error(`  ${issue}`);
-          }
-          console.error("\nPlease resolve these issues before running tasks.");
-          console.error("\nSetup steps:");
-          console.error("  1. ./infra/setup-firecracker.sh");
-          console.error("  2. ./infra/build-kernel.sh");
-          console.error("  3. ./infra/build-rootfs.sh");
-          process.exit(1);
-        }
-        logger.succeedSpinner("Prerequisites OK");
-      }
-
-      // Execute task
-      logger.info(`\nGoal: ${chalk.bold(goal)}\n`);
-      const startTime = Date.now();
-      let completed = false;
-      let summary: string | undefined;
-
-      for await (const event of client.runTask({
-        workspacePath,
-        goal,
-        ...apiKeys,
-        verbose: options.verbose,
-      })) {
-        renderEvent(event, logger);
-        
-        if (event.type === "complete") {
-          completed = true;
-          summary = event.summary;
-        }
-      }
-
-      const duration = Date.now() - startTime;
-
-      // Display result
-      console.log("\n" + chalk.cyan("═".repeat(60)));
-      if (completed) {
-        logger.success("Task completed successfully");
-      } else {
-        logger.error("Task incomplete");
-      }
-      logger.info(`Duration: ${(duration / 1000).toFixed(1)}s`);
-      console.log(chalk.cyan("═".repeat(60)));
-
-      process.exit(completed ? 0 : 1);
     } catch (error) {
       console.error("\n✗ Fatal error:", error);
       process.exit(1);
@@ -731,9 +637,9 @@ const configCmd = program
  */
 configCmd
   .command("set")
-  .description("Set an API key")
+  .description("Set a configuration value")
   .argument("<key>", `Key name (${CREDENTIAL_KEYS.join(", ")})`)
-  .argument("[value]", "Key value (will prompt if not provided)")
+  .argument("[value]", "Value (will prompt if not provided)")
   .action(async (key: string, value?: string) => {
     // Validate key name
     if (!CREDENTIAL_KEYS.includes(key as CredentialKey)) {
@@ -745,9 +651,10 @@ configCmd
     // Get value interactively if not provided
     let apiKey = value;
     if (!apiKey) {
+      const isSecret = key !== "model";
       try {
         const response = await prompts({
-          type: 'password',
+          type: isSecret ? 'password' : 'text',
           name: 'value',
           message: `Enter ${key}:`,
         });
@@ -779,7 +686,7 @@ configCmd
  */
 configCmd
   .command("get")
-  .description("Check if an API key is configured (does not reveal value)")
+  .description("Get a configuration value")
   .argument("<key>", `Key name (${CREDENTIAL_KEYS.join(", ")})`)
   .action((key: string) => {
     // Validate key name
@@ -790,7 +697,13 @@ configCmd
     }
 
     if (hasCredential(key as CredentialKey)) {
-      console.log(`${key}: ${chalk.green("***configured***")}`);
+      const isSecret = key !== "model";
+      if (isSecret) {
+        console.log(`${key}: ${chalk.green("***configured***")}`);
+      } else {
+        const val = getCredential(key as CredentialKey);
+        console.log(`${key}: ${chalk.green(val)}`);
+      }
     } else {
       console.log(`${key}: ${chalk.yellow("not set")}`);
     }
@@ -801,13 +714,22 @@ configCmd
  */
 configCmd
   .command("list")
-  .description("List all API keys and their configuration status")
+  .description("List all configuration values and their status")
   .action(() => {
-    console.log(chalk.bold("API Key Configuration:\n"));
+    console.log(chalk.bold("Configuration:\n"));
     
     for (const key of CREDENTIAL_KEYS) {
-      const status = hasCredential(key) ? chalk.green("✓ configured") : chalk.yellow("✗ not set");
-      console.log(`  ${key.padEnd(20)} ${status}`);
+      const isSecret = key !== "model";
+      if (hasCredential(key)) {
+        if (isSecret) {
+          console.log(`  ${key.padEnd(20)} ${chalk.green("✓ configured")}`);
+        } else {
+          const val = getCredential(key);
+          console.log(`  ${key.padEnd(20)} ${chalk.green(val)}`);
+        }
+      } else {
+        console.log(`  ${key.padEnd(20)} ${chalk.yellow("✗ not set")}`);
+      }
     }
     
     console.log(chalk.gray(`\nConfig file: ${getCredentialsPath()}`));

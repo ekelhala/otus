@@ -14,6 +14,7 @@ import { GLOBAL_CONFIG, CREDENTIAL_KEYS, type CredentialKey } from "./constants.
 export interface Credentials {
   openrouter_api_key?: string;
   voyage_api_key?: string;
+  model?: string;
 }
 
 /**

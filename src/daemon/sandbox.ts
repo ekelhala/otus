@@ -459,17 +459,22 @@ export class SandboxManager {
       return content
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"))
-        // .otusignore is always synced and must never be excluded.
-        .filter((pattern) => !this.isAlwaysSyncedPath(pattern));
+        .filter((line) => line && !line.startsWith("#"));
     } catch {
       return [];
     }
   }
 
-  private isAlwaysSyncedPath(pattern: string): boolean {
-    const normalized = pattern.replace(/^\.\//, "").trim();
-    return normalized === ".otusignore" || normalized === "**/.otusignore";
+  /**
+   * Paths that are never synced in either direction.
+   * These are critical workspace-local files that the sandbox agent must not overwrite.
+   */
+  private isProtectedPath(relPath: string): boolean {
+    // .otus/ directory (contains memory DB, config, lancedb, etc.)
+    if (relPath === ".otus" || relPath.startsWith(".otus/")) return true;
+    // .otusignore file
+    if (relPath === ".otusignore") return true;
+    return false;
   }
 
   private async getTarSnapshotPaths(tarFile: string): Promise<Set<string>> {
@@ -516,8 +521,8 @@ export class SandboxManager {
   }
 
   private shouldExcludePath(relPath: string, excludes: string[]): boolean {
-    // Always allow .otusignore to participate in sync
-    if (relPath === ".otusignore") return false;
+    // Protected paths are never synced in either direction.
+    if (this.isProtectedPath(relPath)) return true;
 
     // Best-effort match tar-style excludes using minimatch.
     // Match both the whole path and the basename to emulate tar's common behavior

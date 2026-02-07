@@ -22,6 +22,8 @@ export interface WorkspaceConfig {
   voyageApiKey: string;
   otusIgnoreFile?: string;
   verbose?: boolean;
+  /** OpenRouter model identifier (overrides default) */
+  model?: string;
 }
 
 /**
@@ -255,6 +257,7 @@ coverage
       semanticMemory: this.semanticMemory,
       workspacePath: this.config.workspacePath,
       logger: this.logger,
+      model: this.config.model,
     });
     this.logger.debug("Inference engine initialized");
 
@@ -266,7 +269,7 @@ coverage
   /**
    * Start a new chat session
    */
-  startSession(): string {
+  startSession(): { sessionId: string; model: string } {
     if (!this.inferenceEngine) {
       throw new Error("Workspace not initialized");
     }
@@ -274,7 +277,7 @@ coverage
     const sessionId = this.inferenceEngine.startSession();
     this.sessions.set(sessionId, { engine: this.inferenceEngine });
     
-    return sessionId;
+    return { sessionId, model: this.inferenceEngine.getModel() };
   }
 
   /**

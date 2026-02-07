@@ -14,6 +14,7 @@ interface InitRequest {
   openrouterApiKey: string;
   voyageApiKey: string;
   verbose?: boolean;
+  model?: string;
 }
 
 interface PrerequisitesRequest {
@@ -26,14 +27,6 @@ interface CreateSessionRequest {
 
 interface SendMessageRequest {
   message: string;
-}
-
-interface TaskRequest {
-  workspacePath: string;
-  goal: string;
-  openrouterApiKey: string;
-  voyageApiKey: string;
-  verbose?: boolean;
 }
 
 interface ShutdownWorkspaceRequest {
@@ -150,12 +143,6 @@ export class DaemonServer {
       return await this.handleEndSession(sessionId);
     }
 
-    // Run task (one-shot with SSE stream)
-    if (method === "POST" && path === "/tasks") {
-      const body = await req.json() as TaskRequest;
-      return await this.handleRunTask(body);
-    }
-
     // Shutdown specific workspace
     if (method === "POST" && path.startsWith("/workspaces/") && path.endsWith("/shutdown")) {
       const encodedPath = path.split("/")[2];
@@ -181,7 +168,7 @@ export class DaemonServer {
    * Initialize a workspace
    */
   private async handleInit(body: InitRequest): Promise<Response> {
-    const { workspacePath, openrouterApiKey, voyageApiKey, verbose } = body;
+    const { workspacePath, openrouterApiKey, voyageApiKey, verbose, model } = body;
 
     // Check if already initialized
     if (this.workspaces.has(workspacePath)) {
@@ -197,6 +184,7 @@ export class DaemonServer {
       openrouterApiKey,
       voyageApiKey,
       verbose,
+      model,
     });
 
     this.workspaces.set(workspacePath, context);
@@ -221,11 +209,11 @@ export class DaemonServer {
       );
     }
 
-    const sessionId = context.startSession();
+    const { sessionId, model } = context.startSession();
     this.sessions.set(sessionId, { workspacePath, sessionId });
 
     return new Response(
-      JSON.stringify({ sessionId }),
+      JSON.stringify({ sessionId, model }),
       { headers: { "Content-Type": "application/json" } }
     );
   }
@@ -290,38 +278,6 @@ export class DaemonServer {
       JSON.stringify({ message: "Session ended" }),
       { headers: { "Content-Type": "application/json" } }
     );
-  }
-
-  /**
-   * Run a one-shot task with SSE streaming
-   */
-  private async handleRunTask(body: TaskRequest): Promise<Response> {
-    const { workspacePath, goal, openrouterApiKey, voyageApiKey, verbose } = body;
-
-    // Create or get workspace context
-    let context = this.workspaces.get(workspacePath);
-    if (!context) {
-      context = await WorkspaceContext.create({
-        workspacePath,
-        openrouterApiKey,
-        voyageApiKey,
-        verbose,
-      });
-      this.workspaces.set(workspacePath, context);
-    }
-
-    const sessionId = context.startSession();
-    const engine = context.getInferenceEngine(sessionId);
-    
-    if (!engine) {
-      return new Response(
-        JSON.stringify({ error: "Failed to create inference engine" }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    // Stream the task execution and return
-    return this.createSSEStream(engine.chat(goal));
   }
 
   /**

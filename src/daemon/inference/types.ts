@@ -29,6 +29,8 @@ export interface InferenceEngineConfig {
   semanticMemory: SemanticMemory;
   workspacePath: string;
   logger: Logger;
+  /** OpenRouter model identifier */
+  model?: string;
 }
 
 /**
