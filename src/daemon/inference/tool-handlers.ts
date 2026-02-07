@@ -204,12 +204,8 @@ ${result.content}
 
     this.logger.toolResult("plan", `Created plan with ${input.steps.length} steps`);
     
-    // Format the plan for display
-    const formattedSteps = input.steps
-      .map((step, i) => `${i + 1}. ${step}`)
-      .join("\n");
-
-    return `Plan created with ${input.steps.length} steps:\n${formattedSteps}\n\nStarting with step 1...`;
+    // Return minimal acknowledgment - the engine handles step injection
+    return `Plan accepted with ${input.steps.length} steps. Focus on the next step instruction.`;
   }
 
   /**

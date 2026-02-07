@@ -15,8 +15,11 @@ export type InferenceEvent =
   | { type: "thinking"; text: string }
   | { type: "tool_call"; name: string; input: unknown }
   | { type: "tool_result"; name: string; result: unknown; isError?: boolean }
+  | { type: "plan_created"; steps: string[]; currentStep: number }
+  | { type: "plan_step_complete"; completedStep: number; nextStep: number; totalSteps: number }
   | { type: "complete"; summary?: string }
   | { type: "error"; message: string }
+  | { type: "max_iterations_reached"; current: number }
   | { type: "stream_end" }; // Internal signal for SSE stream completion
 
 /**
