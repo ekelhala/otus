@@ -19,6 +19,11 @@ export type ToolName =
   | "kill_terminal"
   | "wait"
   | "search_code"
+  | "docker-build"
+  | "docker-run"
+  | "docker-push"
+  | "docker-stop"
+  | "docker-logs"
   | "task_complete";
 
 /**
@@ -267,6 +272,161 @@ export const tools: OpenAI.ChatCompletionTool[] = [
           },
         },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-build",
+      description:
+        "Build a Docker image on the HOST from a Dockerfile in the user's workspace root (not inside the sandbox VM).",
+      parameters: {
+        type: "object",
+        properties: {
+          dockerfile: {
+            type: "string",
+            description:
+              "Path to Dockerfile relative to the workspace root (default: 'Dockerfile')",
+          },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Image tags to apply (e.g., ['myapp:latest', 'myapp:v1.0'])",
+          },
+          build_args: {
+            type: "object",
+            description:
+              "Build-time variables as key-value pairs (e.g., {'NODE_VERSION': '18'})",
+          },
+        },
+        required: ["tags"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-run",
+      description:
+        "Run a Docker container on the HOST (not inside the sandbox VM).",
+      parameters: {
+        type: "object",
+        properties: {
+          image: {
+            type: "string",
+            description: "Docker image to run (e.g., 'nginx:latest', 'myapp:v1')",
+          },
+          name: {
+            type: "string",
+            description: "Container name for easy reference",
+          },
+          ports: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Port mappings in format 'host:container' (e.g., ['8080:80', '3000:3000'])",
+          },
+          environment: {
+            type: "object",
+            description:
+              "Environment variables as key-value pairs (e.g., {'NODE_ENV': 'production'})",
+          },
+          detach: {
+            type: "boolean",
+            description:
+              "Run container in background (default: true)",
+          },
+          command: {
+            type: "string",
+            description:
+              "Command to run in container (overrides image CMD)",
+          },
+        },
+        required: ["image"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-push",
+      description:
+        "Push a Docker image to a container registry from the HOST environment (not inside the sandbox VM).",
+      parameters: {
+        type: "object",
+        properties: {
+          image: {
+            type: "string",
+            description:
+              "Image name and tag to push (e.g., 'username/myapp:latest', 'ghcr.io/user/app:v1')",
+          },
+        },
+        required: ["image"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-stop",
+      description:
+        "Stop one or more running Docker containers on the HOST environment.",
+      parameters: {
+        type: "object",
+        properties: {
+          containers: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Container names or IDs to stop (e.g., ['web-server', 'db'])",
+          },
+          timeout: {
+            type: "number",
+            description:
+              "Seconds to wait before killing container (default: 10)",
+          },
+        },
+        required: ["containers"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-logs",
+      description:
+        "Fetch logs from a Docker container on the HOST environment.",
+      parameters: {
+        type: "object",
+        properties: {
+          container: {
+            type: "string",
+            description: "Container name or ID to get logs from",
+          },
+          follow: {
+            type: "boolean",
+            description:
+              "Follow log output in real-time (default: false)",
+          },
+          tail: {
+            type: "number",
+            description:
+              "Number of lines to show from end of logs (default: all)",
+          },
+          since: {
+            type: "string",
+            description:
+              "Show logs since timestamp or relative (e.g., '2023-01-01T00:00:00', '10m')",
+          },
+          timestamps: {
+            type: "boolean",
+            description:
+              "Show timestamps with log entries (default: false)",
+          },
+        },
+        required: ["container"],
       },
     },
   },
