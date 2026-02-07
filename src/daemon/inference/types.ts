@@ -6,6 +6,7 @@ import type { SandboxManager } from "../sandbox.ts";
 import type { EpisodicMemory } from "../memory/episodic.ts";
 import type { SemanticMemory } from "../memory/semantic.ts";
 import type { Logger } from "@shared/logger.ts";
+import type { ContextBuilderConfig } from "./context-builder.ts";
 
 /**
  * Stream event types for inference
@@ -34,6 +35,8 @@ export interface InferenceEngineConfig {
   logger: Logger;
   /** OpenRouter model identifier */
   model?: string;
+  /** Context builder configuration (optional, uses defaults if not provided) */
+  contextConfig?: Partial<ContextBuilderConfig>;
 }
 
 /**

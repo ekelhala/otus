@@ -17,6 +17,7 @@ import { tools } from "./tools.ts";
 import type { ToolName } from "./tools.ts";
 import { ToolHandlers } from "./tool-handlers.ts";
 import { buildInitialPrompt, ACTION_PROMPT, SYSTEM_PROMPT } from "./prompts.ts";
+import { ContextBuilder } from "./context-builder.ts";
 
 /**
  * Inference Engine implementing the ReAct loop
@@ -27,6 +28,7 @@ export class InferenceEngine {
   private readonly episodicMemory: InferenceEngineConfig["episodicMemory"];
   private readonly logger: InferenceEngineConfig["logger"];
   private readonly model: string;
+  private readonly contextBuilder: ContextBuilder;
 
   /** Conversation history for interactive mode */
   private messages: OpenAI.ChatCompletionMessageParam[] = [];
@@ -41,6 +43,8 @@ export class InferenceEngine {
   private paused: boolean = false;
   /** Current iteration count (preserved during pause, reset on new request) */
   private currentIteration: number = 0;
+  /** Consecutive iterations where model returned no tool calls */
+  private consecutiveNoToolCalls: number = 0;
 
   constructor(config: InferenceEngineConfig) {
     // Configure OpenAI client to use OpenRouter
@@ -55,6 +59,7 @@ export class InferenceEngine {
     this.episodicMemory = config.episodicMemory;
     this.logger = config.logger;
     this.model = config.model || "google/gemini-2.5-flash";
+    this.contextBuilder = new ContextBuilder(config.contextConfig);
 
     this.toolHandlers = new ToolHandlers({
       sandboxManager: config.sandboxManager,
@@ -76,6 +81,8 @@ export class InferenceEngine {
     this.awaitingContinuation = false;
     this.paused = false;
     this.currentIteration = 0;
+    this.consecutiveNoToolCalls = 0;
+    this.contextBuilder.clearSummary();
 
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
@@ -142,6 +149,7 @@ export class InferenceEngine {
       this.awaitingContinuation = false;
       this.paused = false;
       this.currentIteration = 0;
+      this.consecutiveNoToolCalls = 0;
     }
 
     let iteration = 0;
@@ -259,6 +267,31 @@ export class InferenceEngine {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.debug(`API call failed: ${errorMessage}`);
+
+      // Log detailed error information for HTTP/API errors
+      if (error && typeof error === "object") {
+        const apiError = error as any;
+        if (apiError.status) {
+          this.logger.debug(`API HTTP status: ${apiError.status}`);
+        }
+        if (apiError.error) {
+          this.logger.debug(`API error body: ${JSON.stringify(apiError.error, null, 2)}`);
+        }
+        if (apiError.code) {
+          this.logger.debug(`API error code: ${apiError.code}`);
+        }
+        if (apiError.headers) {
+          // Log rate-limit / retry headers if present
+          const h = apiError.headers;
+          const relevant = ["retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"];
+          for (const key of relevant) {
+            if (h[key] || h.get?.(key)) {
+              this.logger.debug(`API header ${key}: ${h[key] ?? h.get(key)}`);
+            }
+          }
+        }
+      }
+
       // Yield error event and stop gracefully instead of throwing
       yield { type: "error", message: `API error: ${errorMessage}` };
       return { complete: true, summary: `Error: ${errorMessage}` };
@@ -271,16 +304,14 @@ export class InferenceEngine {
     }
 
     // Process response before deciding what to persist.
-    // Important: free-form assistant text (without tool calls) can self-steer later iterations.
-    // We treat it as transient and do not add it to conversation history.
     const { toolCalls, textContent } = this.parseResponse(choice.message);
     this.logger.debug(`Parsed response: ${toolCalls.length} tool calls, text length: ${textContent.length}`);
 
-    // Only persist assistant messages that actually contain tool calls.
-    // This keeps the conversation grounded in user intent and tool observations.
-    if (toolCalls.length > 0) {
-      this.messages.push(choice.message);
-    }
+    // Persist a sanitized copy of the assistant message.
+    // We must always persist so the model sees proper turn-taking, but the raw
+    // response object can contain fields (tool_calls: null, refusal: null, etc.)
+    // that trip strict API validators when sent back as request params.
+    this.messages.push(this.sanitizeAssistantMessage(choice.message));
 
     // Yield thinking text if present
     if (textContent) {
@@ -296,15 +327,33 @@ export class InferenceEngine {
 
     // Execute tool calls if present
     if (toolCalls.length > 0) {
+      this.consecutiveNoToolCalls = 0; // Reset counter when tool calls are made
       this.logger.debug(`Executing ${toolCalls.length} tool calls`);
       const result = yield* this.executeToolCalls(toolCalls, iteration);
       this.logger.debug(`Tool calls completed, turnComplete=${result.complete}`);
       return result;
     }
 
-    // No tool calls - prompt model to take action or call task_complete
-    // Only task_complete tool should signal actual completion
-    this.promptForAction();
+    // No tool calls - track consecutive misses and escalate prompts
+    this.consecutiveNoToolCalls++;
+    this.logger.debug(`No tool calls (${this.consecutiveNoToolCalls} consecutive)`);
+
+    if (this.consecutiveNoToolCalls >= 3) {
+      // Model is stuck in a loop - force completion to break out
+      this.logger.debug("Model stuck: 3 consecutive iterations without tool calls, forcing completion");
+      this.consecutiveNoToolCalls = 0;
+      return { complete: true, summary: textContent || "Agent could not determine next action" };
+    }
+
+    // Escalate the prompt on the second miss
+    if (this.consecutiveNoToolCalls === 2) {
+      this.messages.push({
+        role: "user",
+        content: "You MUST call a tool now. If the task is done, call task_complete. Do not reply with text only.",
+      });
+    } else {
+      this.promptForAction();
+    }
     return { complete: false };
   }
 
@@ -314,17 +363,50 @@ export class InferenceEngine {
   private async callModel(): Promise<OpenAI.ChatCompletion> {
     this.logger.debug(`Calling model API with ${this.messages.length} messages`);
     
+    // Build current step directive if we have an active plan
+    let currentStepDirective: string | undefined;
+    if (this.planSteps.length > 0 && this.currentStepIndex < this.planSteps.length) {
+      const stepNum = this.currentStepIndex + 1;
+      const totalSteps = this.planSteps.length;
+      const currentStep = this.planSteps[this.currentStepIndex];
+      currentStepDirective = `[Step ${stepNum}/${totalSteps}] Focus ONLY on this step now: ${currentStep}\n\nComplete this step, then call task_complete. Do not work on any other steps.`;
+    }
+    
+    // Build context with budget constraints
+    const builtContext = this.contextBuilder.buildContext(
+      SYSTEM_PROMPT,
+      this.messages,
+      currentStepDirective
+    );
+    
+    this.logger.debug(
+      `Built context: ${builtContext.metadata.messageCount} messages, ` +
+      `${builtContext.metadata.totalChars} chars, ` +
+      `${builtContext.metadata.truncatedMessages} truncated`
+    );
+    
+    // Log message roles/structure for debugging ordering issues
+    const roleSequence = builtContext.messages.map((m, idx) => {
+      let desc = m.role;
+      if (m.role === "assistant" && "tool_calls" in m && m.tool_calls?.length) {
+        desc += `(${m.tool_calls.length} tool_calls)`;
+      }
+      if (m.role === "tool") {
+        desc += `(${(m as any).tool_call_id?.substring(0, 8)}...)`;
+      }
+      if (m.role === "system" && typeof m.content === "string") {
+        const preview = m.content.substring(0, 30).replace(/\n/g, " ");
+        desc += `("${preview}...")`;
+      }
+      return `${idx}:${desc}`;
+    });
+    this.logger.debug(`Context message sequence: [${roleSequence.join(", ")}]`);
+    
     const response = await this.client.chat.completions.create(
       {
         model: this.model,
         max_tokens: LLM.MAX_TOKENS,
-        messages: [
-          {
-            role: "system",
-            content: SYSTEM_PROMPT,
-          },
-          ...this.messages,
-        ],
+        messages: builtContext.messages,
         tools: tools,
         tool_choice: "auto",
       },
@@ -531,18 +613,47 @@ export class InferenceEngine {
   }
 
   /**
-   * Activate a plan and inject the first step
+   * Sanitize an assistant response message into a clean request param.
+   * Strips response-only fields (refusal, function_call, etc.) and avoids
+   * sending tool_calls: null/[] which some providers reject.
+   */
+  private sanitizeAssistantMessage(
+    message: OpenAI.ChatCompletionMessage
+  ): OpenAI.ChatCompletionAssistantMessageParam {
+    const clean: OpenAI.ChatCompletionAssistantMessageParam = {
+      role: "assistant",
+      content: message.content ?? "",
+    };
+
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      clean.tool_calls = message.tool_calls
+        .filter((tc): tc is ChatCompletionMessageFunctionToolCall => tc.type === "function")
+        .map((tc) => ({
+          id: tc.id,
+          type: tc.type,
+          function: { name: tc.function.name, arguments: tc.function.arguments },
+        }));
+      // Drop tool_calls entirely if none survived the filter
+      if (clean.tool_calls.length === 0) {
+        delete clean.tool_calls;
+      }
+    }
+
+    return clean;
+  }
+
+  /**
+   * Activate a plan
+   * Note: The step directive is now handled by the context builder via currentStepDirective
+   * This ensures proper message ordering: assistant -> tool results -> (context with step)
    */
   private activatePlan(steps: string[]): void {
     this.planSteps = steps;
     this.currentStepIndex = 0;
     
-    // Inject first step as a user message - only the current step, not the full plan
-    const firstStep = this.planSteps[0];
-    this.messages.push({
-      role: "user",
-      content: `[Step 1/${this.planSteps.length}] Focus ONLY on this step now: ${firstStep}\n\nComplete this step, then call task_complete. Do not work on any other steps.`,
-    });
+    // Update session summary with the plan
+    const planSummary = `Plan activated with ${steps.length} steps:\n${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`;
+    this.updateSessionSummary(planSummary);
     
     this.logger.debug(`Plan activated with ${steps.length} steps. Starting step 1.`);
   }
@@ -556,17 +667,29 @@ export class InferenceEngine {
 
   /**
    * Move to the next step in the plan
+   * Note: The step directive is now handled by the context builder via currentStepDirective
+   * This ensures proper message ordering: assistant -> tool results -> (context with step)
    */
   private moveToNextStep(): void {
     this.currentStepIndex++;
-    const nextStep = this.planSteps[this.currentStepIndex];
     
-    // Inject next step as a user message - only the current step
-    this.messages.push({
-      role: "user",
-      content: `[Step ${this.currentStepIndex + 1}/${this.planSteps.length}] Focus ONLY on this step now: ${nextStep}\n\nComplete this step, then call task_complete. Do not work on any other steps.`,
-    });
+    // Update session summary with progress
+    const stepNum = this.currentStepIndex + 1;
+    const summary = `Completed step ${stepNum - 1}/${this.planSteps.length}. Now on step ${stepNum}.`;
+    this.updateSessionSummary(summary);
     
     this.logger.debug(`Moving to step ${this.currentStepIndex + 1}/${this.planSteps.length}`);
+  }
+
+  /**
+   * Update the rolling session summary
+   */
+  private updateSessionSummary(update: string): void {
+    const currentSummary = this.contextBuilder.getSummary();
+    const newSummary = currentSummary 
+      ? `${currentSummary}\n${update}`
+      : update;
+    this.contextBuilder.updateSummary(newSummary);
+    this.logger.debug(`Session summary updated: ${update}`);
   }
 }
