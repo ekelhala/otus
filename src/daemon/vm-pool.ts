@@ -31,6 +31,7 @@ export class VMPool {
   private nextCid = 3; // Starting CID for VSock
   private poolSize = 1; // Number of VMs to keep ready
   private isWarming = false;
+  private hasLoggedPrereqError = false;
 
   /**
    * Start warming the pool
@@ -46,6 +47,8 @@ export class VMPool {
     // Warm VMs in background
     this.warmPool().catch((error) => {
       logger.debug(`VM pool warming failed: ${error instanceof Error ? error.message : error}`);
+      // Ensure callers can retry warming later
+      this.isWarming = false;
     });
   }
 
@@ -53,17 +56,58 @@ export class VMPool {
    * Warm the pool to target size
    */
   private async warmPool(): Promise<void> {
-    while (this.availableVMs.length < this.poolSize) {
-      try {
-        const vm = await this.createPoolVM();
-        this.availableVMs.push(vm);
-        logger.debug(`Pool VM ${vm.id} ready (${this.availableVMs.length}/${this.poolSize})`);
-      } catch (error) {
-        logger.debug(`Failed to create pool VM: ${error instanceof Error ? error.message : error}`);
-        // Wait before retrying
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+    try {
+      while (this.availableVMs.length < this.poolSize) {
+        try {
+          const vm = await this.createPoolVM();
+          this.availableVMs.push(vm);
+          logger.debug(`Pool VM ${vm.id} ready (${this.availableVMs.length}/${this.poolSize})`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.debug(`Failed to create pool VM: ${message}`);
+
+          // If we're missing prerequisites (e.g. TAP pool not set up), log a clear error once
+          // and pause warming to avoid spamming "VM destroyed" on retry.
+          if (this.isPrerequisiteFailure(message)) {
+            if (!this.hasLoggedPrereqError) {
+              this.hasLoggedPrereqError = true;
+              logger.error(
+                `VM pool warming paused: ${message}\n` +
+                  `Fix the prerequisite and then restart the daemon (or rerun the command that starts it).`
+              );
+            }
+            return;
+          }
+
+          // Wait before retrying transient failures
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
       }
+    } finally {
+      // Allow future warm attempts (e.g. after prerequisite is fixed)
+      this.isWarming = false;
     }
+  }
+
+  /**
+   * Detect failures that require user action (as opposed to transient boot/connect issues).
+   */
+  private isPrerequisiteFailure(message: string): boolean {
+    const m = message.toLowerCase();
+
+    // TAP pool / networking not set up
+    if (m.includes("tap pool") && m.includes("not set up")) return true;
+    if (m.includes("bridge") && m.includes("not found") && m.includes("setup-tap-pool")) return true;
+    if (m.includes("tap device") && m.includes("not found") && m.includes("setup-tap-pool")) return true;
+    if (m.includes("setup-tap-pool.sh")) return true;
+
+    // Missing VM assets
+    if (m.includes("vm assets not found")) return true;
+
+    // Missing firecracker binary
+    if (m.includes("firecracker binary not found")) return true;
+
+    return false;
   }
 
   /**
@@ -161,8 +205,10 @@ export class VMPool {
       logger.debug(`Providing pool VM ${vm.id} to workspace`);
       
       // Start warming a replacement VM in background
-      this.warmPool().catch((error) => {
-        logger.debug(`Failed to warm replacement VM: ${error instanceof Error ? error.message : error}`);
+      this.startWarming().catch((error) => {
+        logger.debug(
+          `Failed to warm replacement VM: ${error instanceof Error ? error.message : error}`
+        );
       });
     }
 
