@@ -35,6 +35,12 @@ export class InferenceEngine {
   /** Current plan steps and progress */
   private planSteps: string[] = [];
   private currentStepIndex: number = 0;
+  /** Track if we hit max iterations and are awaiting continuation */
+  private awaitingContinuation: boolean = false;
+  /** Track if execution was paused */
+  private paused: boolean = false;
+  /** Current iteration count (preserved during pause, reset on new request) */
+  private currentIteration: number = 0;
 
   constructor(config: InferenceEngineConfig) {
     // Configure OpenAI client to use OpenRouter
@@ -67,6 +73,9 @@ export class InferenceEngine {
     this.messages = [];
     this.planSteps = [];
     this.currentStepIndex = 0;
+    this.awaitingContinuation = false;
+    this.paused = false;
+    this.currentIteration = 0;
 
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
@@ -95,8 +104,45 @@ export class InferenceEngine {
       `Processing: ${userMessage.substring(0, 100)}${userMessage.length > 100 ? "..." : ""}`
     );
 
-    // Add user message to conversation
-    this.addUserMessage(userMessage);
+    // Check if this is a pause signal (user pressed Ctrl+C)
+    if (userMessage.toLowerCase() === "pause") {
+      this.logger.debug("Pause signal received");
+      this.paused = true;
+      // Don't process, just set the flag and return
+      return;
+    }
+
+    // Check if this is resuming from pause
+    const isResumingFromPause = this.paused && 
+      (userMessage.toLowerCase() === "continue" || 
+       userMessage.toLowerCase() === "yes" || 
+       userMessage.toLowerCase() === "y");
+    
+    // Check if this is a continuation from max iterations
+    const isMaxIterationsContinuation = this.awaitingContinuation && 
+      (userMessage.toLowerCase() === "continue" || 
+       userMessage.toLowerCase() === "yes" || 
+       userMessage.toLowerCase() === "y");
+    
+    if (isResumingFromPause) {
+      this.logger.debug("Resuming from pause...");
+      this.paused = false;
+      // Keep current iteration count when resuming from pause
+      // Don't add the "continue" message to history, just resume
+    } else if (isMaxIterationsContinuation) {
+      this.logger.debug("Continuing from max iterations...");
+      this.awaitingContinuation = false;
+      // Reset iteration count for max iterations continuation (fresh 50)
+      this.currentIteration = 0;
+      // Don't add the "continue" message to history, just resume
+    } else {
+      // Add user message to conversation
+      this.addUserMessage(userMessage);
+      // Reset flags and iteration count for new requests
+      this.awaitingContinuation = false;
+      this.paused = false;
+      this.currentIteration = 0;
+    }
 
     let iteration = 0;
     let turnComplete = false;
@@ -105,7 +151,8 @@ export class InferenceEngine {
     try {
       while (iteration < EXECUTION.MAX_ITERATIONS && !turnComplete) {
         iteration++;
-        yield { type: "iteration", current: iteration, max: EXECUTION.MAX_ITERATIONS };
+        this.currentIteration++;
+        yield { type: "iteration", current: this.currentIteration, max: EXECUTION.MAX_ITERATIONS };
 
         const result = yield* this.processIteration(iteration);
 
@@ -116,12 +163,18 @@ export class InferenceEngine {
       }
 
       if (iteration >= EXECUTION.MAX_ITERATIONS) {
-        this.logger.debug("Max iterations reached");
+        this.logger.debug("Max iterations reached, prompting for continuation");
+        this.awaitingContinuation = true;
+        
         this.episodicMemory.logEvent(this.sessionId, "reflect", {
-          status: "incomplete",
-          reason: "max_iterations_reached",
-          iterations: iteration,
+          status: "max_iterations",
+          reason: "awaiting_continuation",
+          iterations: this.currentIteration,
         });
+        
+        yield { type: "max_iterations_reached", current: this.currentIteration };
+        // Don't yield complete - we're paused, not done
+        return;
       }
 
       yield { type: "complete", summary: completionSummary };
@@ -304,6 +357,7 @@ export class InferenceEngine {
     const toolResults: ToolResultMessage[] = [];
     let turnComplete = false;
     let completionSummary: string | undefined;
+    let pendingPlanSteps: string[] | null = null;
 
     for (const toolCall of toolCalls) {
       this.logger.debug(`About to delegate to executeSingleToolCall for ${toolCall.function.name}`);
@@ -311,11 +365,17 @@ export class InferenceEngine {
       this.logger.debug(`executeSingleToolCall returned for ${toolCall.function.name}`);
       toolResults.push(result.toolResult);
 
-      // Handle plan tool - activate the plan
+      // Handle plan tool - defer activation until after tool results are in messages
       if (toolCall.function.name === "plan") {
         try {
           const planInput = JSON.parse(toolCall.function.arguments);
-          this.activatePlan(planInput.steps);
+          pendingPlanSteps = planInput.steps;
+          // Emit plan created event for CLI visualization
+          yield {
+            type: "plan_created",
+            steps: planInput.steps,
+            currentStep: 1,
+          };
         } catch {
           this.logger.debug("Failed to parse plan input");
         }
@@ -325,9 +385,17 @@ export class InferenceEngine {
       if (result.isTaskComplete) {
         if (this.hasMoreSteps()) {
           // Don't actually complete - move to next step
+          const completedStep = this.currentStepIndex + 1;
           this.moveToNextStep();
           turnComplete = false;
-          this.logger.debug(`Step ${this.currentStepIndex} completed, moving to step ${this.currentStepIndex + 1}`);
+          this.logger.debug(`Step ${completedStep} completed, moving to step ${this.currentStepIndex + 1}`);
+          // Emit step completion event
+          yield {
+            type: "plan_step_complete",
+            completedStep,
+            nextStep: this.currentStepIndex + 1,
+            totalSteps: this.planSteps.length,
+          };
         } else {
           // All steps done or no plan active - truly complete
           turnComplete = true;
@@ -336,9 +404,15 @@ export class InferenceEngine {
       }
     }
 
-    // Add all tool results to messages
+    // Add all tool results to messages first (must follow assistant message)
     for (const toolResult of toolResults) {
       this.messages.push(toolResult);
+    }
+
+    // Now activate plan and inject step message AFTER tool results
+    // This ensures valid message ordering: assistant -> tool results -> user (step)
+    if (pendingPlanSteps) {
+      this.activatePlan(pendingPlanSteps);
     }
 
     return { complete: turnComplete, summary: completionSummary };
@@ -463,11 +537,11 @@ export class InferenceEngine {
     this.planSteps = steps;
     this.currentStepIndex = 0;
     
-    // Inject first step as a user message
+    // Inject first step as a user message - only the current step, not the full plan
     const firstStep = this.planSteps[0];
     this.messages.push({
       role: "user",
-      content: `[Step 1/${this.planSteps.length}] ${firstStep}`,
+      content: `[Step 1/${this.planSteps.length}] Focus ONLY on this step now: ${firstStep}\n\nComplete this step, then call task_complete. Do not work on any other steps.`,
     });
     
     this.logger.debug(`Plan activated with ${steps.length} steps. Starting step 1.`);
@@ -487,10 +561,10 @@ export class InferenceEngine {
     this.currentStepIndex++;
     const nextStep = this.planSteps[this.currentStepIndex];
     
-    // Inject next step as a user message
+    // Inject next step as a user message - only the current step
     this.messages.push({
       role: "user",
-      content: `[Step ${this.currentStepIndex + 1}/${this.planSteps.length}] ${nextStep}`,
+      content: `[Step ${this.currentStepIndex + 1}/${this.planSteps.length}] Focus ONLY on this step now: ${nextStep}\n\nComplete this step, then call task_complete. Do not work on any other steps.`,
     });
     
     this.logger.debug(`Moving to step ${this.currentStepIndex + 1}/${this.planSteps.length}`);
