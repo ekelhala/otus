@@ -460,11 +460,26 @@ program
       const { sessionId, model } = await client.createSession({ workspacePath });
       logger.succeedSpinner("Session created");
 
-      console.log("\n" + chalk.cyan("═".repeat(60)));
-      console.log(chalk.bold.cyan("Otus Interactive Session"));
-      console.log(chalk.gray(`Model: ${model}`));
-      console.log(chalk.gray("Type your requests. Press Ctrl+C to exit."));
-      console.log(chalk.cyan("═".repeat(60)) + "\n");
+      // Display welcome banner with Otus creature
+      console.log("\n");
+      console.log(chalk.cyan("    ___   _____   _   _   ___ "));
+      console.log(chalk.cyan("   / _ \\ |_   _| | | | | / __|"));
+      console.log(chalk.cyan("  | (_) |  | |   | |_| | \\__ \\"));
+      console.log(chalk.cyan("   \\___/   |_|    \\___/  |___/"));
+      console.log("");
+      console.log(chalk.magenta("       .---."));
+      console.log(chalk.magenta("      /o   o\\"));
+      console.log(chalk.magenta("     |   △   |"));
+      console.log(chalk.magenta("      \\ \\_/ /"));
+      console.log(chalk.magenta("       '---'"));
+      console.log("");
+      console.log(chalk.bold("  Your autonomous system engineering agent"));
+      console.log("");
+      console.log(chalk.gray("  Model:   ") + chalk.white(model));
+      console.log(chalk.gray("  Command: ") + chalk.white("/quit") + chalk.gray(" to exit, ") + chalk.white("/help") + chalk.gray(" for help"));
+      console.log("");
+      console.log(chalk.cyan("─".repeat(50)));
+      console.log("");
 
       // Interactive loop using prompts
       const readline = await import("readline");
