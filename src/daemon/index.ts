@@ -296,6 +296,34 @@ coverage
   }
 
   /**
+   * Update model configuration and reinitialize inference engine
+   */
+  updateModel(model?: string): void {
+    if (!model || this.config.model === model) {
+      return; // No change needed
+    }
+
+    this.logger.debug(`Updating model from ${this.config.model || 'default'} to ${model}`);
+    
+    // Update config
+    this.config.model = model;
+
+    // Reinitialize inference engine with new model
+    if (this.inferenceEngine && this.sandboxManager && this.episodicMemory && this.semanticMemory) {
+      this.inferenceEngine = new InferenceEngine({
+        apiKey: this.config.openrouterApiKey,
+        sandboxManager: this.sandboxManager,
+        episodicMemory: this.episodicMemory,
+        semanticMemory: this.semanticMemory,
+        workspacePath: this.config.workspacePath,
+        logger: this.logger,
+        model: this.config.model,
+      });
+      this.logger.debug("Inference engine reinitialized with new model");
+    }
+  }
+
+  /**
    * Get workspace path
    */
   getWorkspacePath(): string {
