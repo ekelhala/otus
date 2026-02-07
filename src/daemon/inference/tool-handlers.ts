@@ -90,6 +90,9 @@ export class ToolHandlers {
       case "docker-stop":
         return await this.dockerStop(input as DockerStopInput);
 
+      case "docker-rm":
+        return await this.dockerRm(input as DockerRmInput);
+
       case "docker-logs":
         return await this.dockerLogs(input as DockerLogsInput);
 
@@ -450,6 +453,36 @@ ${result.content}
   }
 
   /**
+   * Remove Docker containers
+   */
+  private async dockerRm(input: DockerRmInput): Promise<string> {
+    const args: string[] = ["rm"];
+
+    const notices: string[] = [];
+
+    // Add force
+    if (input.force) {
+      args.push("-f");
+    }
+
+    // Add volumes
+    if (input.volumes) {
+      args.push("-v");
+    }
+
+    if (input.additional_args) {
+      notices.push("Ignored additional_args (not supported; use structured parameters only).");
+    }
+
+    // Add containers
+    args.push(...input.containers);
+
+    const result = await this.executeDockerCommand(args);
+    this.logger.toolResult("docker-rm", `Removed container(s): ${input.containers.join(", ")}`);
+    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
+  }
+
+  /**
    * Get Docker container logs
    */
   private async dockerLogs(input: DockerLogsInput): Promise<string> {
@@ -643,6 +676,14 @@ interface DockerPushInput {
 interface DockerStopInput {
   containers: string[];
   timeout?: number;
+  /** Ignored: use structured parameters only */
+  additional_args?: string;
+}
+
+interface DockerRmInput {
+  containers: string[];
+  force?: boolean;
+  volumes?: boolean;
   /** Ignored: use structured parameters only */
   additional_args?: string;
 }

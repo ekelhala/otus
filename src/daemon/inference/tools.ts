@@ -23,6 +23,7 @@ export type ToolName =
   | "docker-run"
   | "docker-push"
   | "docker-stop"
+  | "docker-rm"
   | "docker-logs"
   | "task_complete";
 
@@ -427,6 +428,36 @@ export const tools: OpenAI.ChatCompletionTool[] = [
           },
         },
         required: ["container"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "docker-rm",
+      description:
+        "Remove one or more Docker containers from the HOST environment. Containers must be stopped first unless force is used.",
+      parameters: {
+        type: "object",
+        properties: {
+          containers: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Container names or IDs to remove (e.g., ['web-server', 'db'])",
+          },
+          force: {
+            type: "boolean",
+            description:
+              "Force removal of running containers (default: false)",
+          },
+          volumes: {
+            type: "boolean",
+            description:
+              "Remove associated anonymous volumes (default: false)",
+          },
+        },
+        required: ["containers"],
       },
     },
   },
