@@ -32,6 +32,9 @@ export class InferenceEngine {
   private messages: OpenAI.ChatCompletionMessageParam[] = [];
   /** Current session ID */
   private sessionId: string = "";
+  /** Current plan steps and progress */
+  private planSteps: string[] = [];
+  private currentStepIndex: number = 0;
 
   constructor(config: InferenceEngineConfig) {
     // Configure OpenAI client to use OpenRouter
@@ -62,6 +65,8 @@ export class InferenceEngine {
   startSession(): string {
     this.sessionId = `session-${Date.now()}`;
     this.messages = [];
+    this.planSteps = [];
+    this.currentStepIndex = 0;
 
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
@@ -306,9 +311,28 @@ export class InferenceEngine {
       this.logger.debug(`executeSingleToolCall returned for ${toolCall.function.name}`);
       toolResults.push(result.toolResult);
 
+      // Handle plan tool - activate the plan
+      if (toolCall.function.name === "plan") {
+        try {
+          const planInput = JSON.parse(toolCall.function.arguments);
+          this.activatePlan(planInput.steps);
+        } catch {
+          this.logger.debug("Failed to parse plan input");
+        }
+      }
+
+      // Handle task_complete - check if we should continue with next step
       if (result.isTaskComplete) {
-        turnComplete = true;
-        completionSummary = result.summary;
+        if (this.hasMoreSteps()) {
+          // Don't actually complete - move to next step
+          this.moveToNextStep();
+          turnComplete = false;
+          this.logger.debug(`Step ${this.currentStepIndex} completed, moving to step ${this.currentStepIndex + 1}`);
+        } else {
+          // All steps done or no plan active - truly complete
+          turnComplete = true;
+          completionSummary = result.summary;
+        }
       }
     }
 
@@ -430,5 +454,45 @@ export class InferenceEngine {
     const textContent = message.content || "";
 
     return { toolCalls, textContent: textContent.trim() };
+  }
+
+  /**
+   * Activate a plan and inject the first step
+   */
+  private activatePlan(steps: string[]): void {
+    this.planSteps = steps;
+    this.currentStepIndex = 0;
+    
+    // Inject first step as a user message
+    const firstStep = this.planSteps[0];
+    this.messages.push({
+      role: "user",
+      content: `[Step 1/${this.planSteps.length}] ${firstStep}`,
+    });
+    
+    this.logger.debug(`Plan activated with ${steps.length} steps. Starting step 1.`);
+  }
+
+  /**
+   * Check if there are more steps in the current plan
+   */
+  private hasMoreSteps(): boolean {
+    return this.planSteps.length > 0 && this.currentStepIndex < this.planSteps.length - 1;
+  }
+
+  /**
+   * Move to the next step in the plan
+   */
+  private moveToNextStep(): void {
+    this.currentStepIndex++;
+    const nextStep = this.planSteps[this.currentStepIndex];
+    
+    // Inject next step as a user message
+    this.messages.push({
+      role: "user",
+      content: `[Step ${this.currentStepIndex + 1}/${this.planSteps.length}] ${nextStep}`,
+    });
+    
+    this.logger.debug(`Moving to step ${this.currentStepIndex + 1}/${this.planSteps.length}`);
   }
 }
