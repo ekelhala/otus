@@ -346,9 +346,20 @@ ${result.content}
       throw new Error(`Invalid docker subcommand: ${subcommand}`);
     }
 
+    // Auto-sync workspace from sandbox before build commands
+    let syncMessage = "";
+    if (subcommand === "build") {
+      const activeSandbox = this.sandboxManager.getActiveSandbox();
+      if (activeSandbox) {
+        const syncResult = await this.sandboxManager.syncFromSandbox(activeSandbox.id);
+        syncMessage = `[Auto-synced ${(syncResult.size / 1024).toFixed(1)}KB from sandbox to host]\n`;
+        this.logger.debug("Auto-synced workspace before docker build");
+      }
+    }
+
     const result = await this.executeDockerCommand(args);
     this.logger.toolResult("docker", `docker ${args.join(" ").substring(0, 60)}`);
-    return result;
+    return syncMessage + result;
   }
 
   /**
