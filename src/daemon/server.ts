@@ -172,6 +172,11 @@ export class DaemonServer {
 
     // Check if already initialized
     if (this.workspaces.has(workspacePath)) {
+      const context = this.workspaces.get(workspacePath)!;
+      
+      // Update model if it changed
+      context.updateModel(model);
+      
       return new Response(
         JSON.stringify({ message: "Workspace already initialized" }),
         { headers: { "Content-Type": "application/json" } }

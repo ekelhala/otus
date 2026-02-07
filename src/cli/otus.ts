@@ -174,6 +174,10 @@ function renderEvent(event: InferenceEvent, logger: Logger): void {
       console.log(chalk.blue("Otus:"), chalk.gray(event.text));
       break;
     case "tool_call":
+      // Don't show plan tool call - it has its own visual (plan_created event)
+      if (event.name === "plan") {
+        break;
+      }
       const description = getToolCallDescription(event.name, event.input);
       console.log(chalk.blue("Otus →"), description);
       if (logger.isVerbose() && event.input) {
@@ -181,6 +185,10 @@ function renderEvent(event: InferenceEvent, logger: Logger): void {
       }
       break;
     case "tool_result":
+      // Don't show plan tool result - it has its own visual (plan_created event)
+      if (event.name === "plan") {
+        break;
+      }
       if (event.isError) {
         console.log(chalk.red("  ✗"), chalk.red(event.result));
       } else if (logger.isVerbose()) {
@@ -204,6 +212,28 @@ function renderEvent(event: InferenceEvent, logger: Logger): void {
       break;
     case "error":
       console.log(chalk.red("Otus:"), chalk.red(event.message));
+      break;
+    case "max_iterations_reached":
+      // Display warning - actual prompt handling is in chat loop
+      console.log(chalk.hex("#FFA500")("\nMaximum iterations reached (") + chalk.bold(event.current) + chalk.hex("#FFA500")(" steps)"));
+      break;
+    case "plan_created":
+      console.log(chalk.cyan("\nPlan created:"));
+      event.steps.forEach((step, index) => {
+        const stepNum = index + 1;
+        const isCurrentStep = stepNum === event.currentStep;
+        if (isCurrentStep) {
+          console.log(chalk.cyan(`  ${stepNum}. `) + chalk.white(step));
+        } else {
+          console.log(chalk.gray(`  ${stepNum}. ${step}`));
+        }
+      });
+      console.log("");
+      break;
+    case "plan_step_complete":
+      console.log(chalk.green(`\n✓ Step ${event.completedStep}/${event.totalSteps} complete`));
+      console.log(chalk.cyan(`→ Moving to step ${event.nextStep}: `) + chalk.white("(continuing...)"));
+      console.log("");
       break;
   }
 }
@@ -492,6 +522,9 @@ program
 
       // Handle graceful shutdown
       let shuttingDown = false;
+      let pauseRequested = false;
+      let isProcessing = false;
+      
       const shutdown = async () => {
         if (shuttingDown) return;
         shuttingDown = true;
@@ -506,7 +539,17 @@ program
         process.exit(0);
       };
 
-      process.on("SIGINT", shutdown);
+      const handleSigInt = () => {
+        if (isProcessing) {
+          // During processing, pause instead of exiting
+          pauseRequested = true;
+        } else {
+          // Not processing, exit normally
+          shutdown();
+        }
+      };
+
+      process.on("SIGINT", handleSigInt);
       process.on("SIGTERM", shutdown);
 
       while (true) {
@@ -534,8 +577,74 @@ program
 
           // Process with agent
           console.log("");
-          for await (const event of client.sendMessage(sessionId, userInput)) {
-            renderEvent(event, logger);
+          
+          // Loop to handle multiple max iteration prompts and pauses
+          let shouldContinue = true;
+          let messageToSend = userInput;
+          
+          while (shouldContinue) {
+            shouldContinue = false;
+            let maxIterationsReached = false;
+            pauseRequested = false;
+            isProcessing = true;
+            
+            try {
+              for await (const event of client.sendMessage(sessionId, messageToSend)) {
+                if (pauseRequested) {
+                  // Stop processing events
+                  break;
+                }
+                renderEvent(event, logger);
+                if (event.type === "max_iterations_reached") {
+                  maxIterationsReached = true;
+                }
+              }
+            } finally {
+              isProcessing = false;
+            }
+            
+            // Handle pause request
+            if (pauseRequested) {
+              // Signal to engine that we're paused (not max iterations)
+              await client.sendMessage(sessionId, "pause").next();
+              
+              console.log(chalk.hex("#FFA500")("\n⏸  Paused")); 
+              const continueResponse = await prompts({
+                type: 'confirm',
+                name: 'continue',
+                message: "Continue execution?",
+                initial: true,
+              });
+              
+              if (continueResponse.continue) {
+                console.log("");
+                // Resume execution
+                messageToSend = "continue";
+                shouldContinue = true;
+              } else {
+                console.log(chalk.gray("\nStopped. Ready for your next request."));
+              }
+              continue; // Skip max iterations check when paused
+            }
+            
+            // If max iterations reached, prompt user to continue
+            if (maxIterationsReached) {
+              const continueResponse = await prompts({
+                type: 'confirm',
+                name: 'continue',
+                message: chalk.hex("#FFA500")("Continue iterating?"),
+                initial: true,
+              });
+              
+              if (continueResponse.continue) {
+                console.log("");
+                // Continue with another iteration
+                messageToSend = "continue";
+                shouldContinue = true;
+              } else {
+                console.log(chalk.gray("\nStopped. Ready for your next request."));
+              }
+            }
           }
         } catch (error) {
           if ((error as any).code === "ERR_USE_AFTER_CLOSE") {
