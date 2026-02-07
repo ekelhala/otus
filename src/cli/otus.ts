@@ -467,12 +467,6 @@ program
       console.log(chalk.cyan("  | (_) |  | |   | |_| | \\__ \\"));
       console.log(chalk.cyan("   \\___/   |_|    \\___/  |___/"));
       console.log("");
-      console.log(chalk.magenta("       .---."));
-      console.log(chalk.magenta("      /o   o\\"));
-      console.log(chalk.magenta("     |   △   |"));
-      console.log(chalk.magenta("      \\ \\_/ /"));
-      console.log(chalk.magenta("       '---'"));
-      console.log("");
       console.log(chalk.bold("  Your autonomous system engineering agent"));
       console.log("");
       console.log(chalk.gray("  Model:   ") + chalk.white(model));
