@@ -78,23 +78,11 @@ export class ToolHandlers {
       case "search_code":
         return await this.searchCode(input as SearchCodeInput);
 
-      case "docker-build":
-        return await this.dockerBuild(input as DockerBuildInput);
+      case "plan":
+        return await this.plan(input as PlanInput);
 
-      case "docker-run":
-        return await this.dockerRun(input as DockerRunInput);
-
-      case "docker-push":
-        return await this.dockerPush(input as DockerPushInput);
-
-      case "docker-stop":
-        return await this.dockerStop(input as DockerStopInput);
-
-      case "docker-rm":
-        return await this.dockerRm(input as DockerRmInput);
-
-      case "docker-logs":
-        return await this.dockerLogs(input as DockerLogsInput);
+      case "docker":
+        return await this.docker(input as DockerInput);
 
       case "task_complete":
         return await this.completeTask(taskId, input as TaskCompleteInput);
@@ -207,6 +195,24 @@ ${result.content}
   }
 
   /**
+   * Create a plan by breaking down a complex task into steps
+   */
+  private async plan(input: PlanInput): Promise<string> {
+    if (!input.steps || input.steps.length === 0) {
+      throw new Error("Plan must contain at least one step");
+    }
+
+    this.logger.toolResult("plan", `Created plan with ${input.steps.length} steps`);
+    
+    // Format the plan for display
+    const formattedSteps = input.steps
+      .map((step, i) => `${i + 1}. ${step}`)
+      .join("\n");
+
+    return `Plan created with ${input.steps.length} steps:\n${formattedSteps}\n\nStarting with step 1...`;
+  }
+
+  /**
    * Complete the task
    */
   private async completeTask(
@@ -311,215 +317,42 @@ ${result.content}
     return `Waited ${input.duration} seconds for: ${input.reason}`;
   }
 
-  // ========== Docker handlers ==========
+  // ========== Docker handler ==========
 
   /**
-   * Build a Docker image
+   * Execute a Docker command in the project workspace
    */
-  private async dockerBuild(input: DockerBuildInput): Promise<string> {
-    const args: string[] = ["build"];
+  private async docker(input: DockerInput): Promise<string> {
+    // Parse command into array of arguments
+    const args = typeof input.command === "string"
+      ? input.command.trim().split(/\s+/).filter(Boolean)
+      : input.command;
 
-    const notices: string[] = [];
-
-    // Add dockerfile path
-    if (input.dockerfile) {
-      const dockerfile = this.sanitizeWorkspaceRelativePath(input.dockerfile, "dockerfile");
-      args.push("-f", dockerfile);
+    if (args.length === 0) {
+      throw new Error("Docker command cannot be empty");
     }
 
-    // Add tags
-    for (const tag of input.tags) {
-      args.push("-t", tag);
+    // Validate that it's a docker command (basic sanity check)
+    const subcommand = args[0];
+    if (!subcommand) {
+      throw new Error("Docker command cannot be empty");
     }
 
-    // Add build args
-    if (input.build_args) {
-      for (const [key, value] of Object.entries(input.build_args)) {
-        args.push("--build-arg", `${key}=${value}`);
-      }
-    }
+    const validSubcommands = [
+      "build", "run", "exec", "ps", "images", "logs", "stop", "start",
+      "restart", "rm", "rmi", "pull", "push", "tag", "inspect", "network",
+      "volume", "compose", "cp", "create", "kill", "pause", "unpause",
+      "port", "stats", "top", "wait", "commit", "diff", "export", "import",
+      "load", "save", "login", "logout", "search", "version", "info"
+    ];
 
-    // Keep the surface area small: additional_args are ignored by design.
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Always use workspace root as context
-    args.push(".");
-
-    const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-build", `Built image(s): ${input.tags.join(", ")}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
-  }
-
-  /**
-   * Run a Docker container
-   */
-  private async dockerRun(input: DockerRunInput): Promise<string> {
-    const args: string[] = ["run"];
-
-    const notices: string[] = [];
-
-    // Add detach mode
-    if (input.detach !== false) {
-      args.push("-d");
-    }
-
-    // Add name
-    if (input.name) {
-      args.push("--name", input.name);
-    }
-
-    // Add port mappings
-    if (input.ports) {
-      for (const port of input.ports) {
-        args.push("-p", port);
-      }
-    }
-
-    // Volumes are intentionally not supported to keep docker tools constrained.
-    if (input.volumes && input.volumes.length > 0) {
-      notices.push("Ignored volumes (not supported by this tool).");
-    }
-
-    // Add environment variables
-    if (input.environment) {
-      for (const [key, value] of Object.entries(input.environment)) {
-        args.push("-e", `${key}=${value}`);
-      }
-    }
-
-    // Keep the surface area small: additional_args are ignored by design.
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Add image
-    args.push(input.image);
-
-    // Add command
-    if (input.command) {
-      args.push(...input.command.split(/\s+/).filter(Boolean));
+    if (!validSubcommands.includes(subcommand)) {
+      throw new Error(`Invalid docker subcommand: ${subcommand}`);
     }
 
     const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-run", `Started container${input.name ? " " + input.name : ""} from ${input.image}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
-  }
-
-  /**
-   * Push a Docker image
-   */
-  private async dockerPush(input: DockerPushInput): Promise<string> {
-    const args: string[] = ["push"];
-
-    const notices: string[] = [];
-
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Add image
-    args.push(input.image);
-
-    const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-push", `Pushed image: ${input.image}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
-  }
-
-  /**
-   * Stop Docker containers
-   */
-  private async dockerStop(input: DockerStopInput): Promise<string> {
-    const args: string[] = ["stop"];
-
-    const notices: string[] = [];
-
-    // Add timeout
-    if (input.timeout !== undefined) {
-      args.push("-t", input.timeout.toString());
-    }
-
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Add containers
-    args.push(...input.containers);
-
-    const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-stop", `Stopped container(s): ${input.containers.join(", ")}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
-  }
-
-  /**
-   * Remove Docker containers
-   */
-  private async dockerRm(input: DockerRmInput): Promise<string> {
-    const args: string[] = ["rm"];
-
-    const notices: string[] = [];
-
-    // Add force
-    if (input.force) {
-      args.push("-f");
-    }
-
-    // Add volumes
-    if (input.volumes) {
-      args.push("-v");
-    }
-
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Add containers
-    args.push(...input.containers);
-
-    const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-rm", `Removed container(s): ${input.containers.join(", ")}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
-  }
-
-  /**
-   * Get Docker container logs
-   */
-  private async dockerLogs(input: DockerLogsInput): Promise<string> {
-    const args: string[] = ["logs"];
-
-    const notices: string[] = [];
-
-    // Add follow
-    if (input.follow) {
-      args.push("-f");
-    }
-
-    // Add tail
-    if (input.tail !== undefined) {
-      args.push("--tail", input.tail.toString());
-    }
-
-    // Add since
-    if (input.since) {
-      args.push("--since", input.since);
-    }
-
-    // Add timestamps
-    if (input.timestamps) {
-      args.push("-t");
-    }
-
-    if (input.additional_args) {
-      notices.push("Ignored additional_args (not supported; use structured parameters only).");
-    }
-
-    // Add container
-    args.push(input.container);
-
-    const result = await this.executeDockerCommand(args);
-    this.logger.toolResult("docker-logs", `Retrieved logs from: ${input.container}`);
-    return notices.length > 0 ? `${notices.join(" ")}\n${result}` : result;
+    this.logger.toolResult("docker", `docker ${args.join(" ").substring(0, 60)}`);
+    return result;
   }
 
   /**
@@ -610,6 +443,10 @@ interface SearchCodeInput {
   limit?: number;
 }
 
+interface PlanInput {
+  steps: string[];
+}
+
 interface TaskCompleteInput {
   summary: string;
   lessons?: string[];
@@ -646,54 +483,6 @@ interface WaitInput {
   reason: string;
 }
 
-interface DockerBuildInput {
-  dockerfile?: string;
-  tags: string[];
-  build_args?: Record<string, string>;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
-}
-
-interface DockerRunInput {
-  image: string;
-  name?: string;
-  ports?: string[];
-  /** Ignored: not supported */
-  volumes?: string[];
-  environment?: Record<string, string>;
-  detach?: boolean;
-  command?: string;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
-}
-
-interface DockerPushInput {
-  image: string;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
-}
-
-interface DockerStopInput {
-  containers: string[];
-  timeout?: number;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
-}
-
-interface DockerRmInput {
-  containers: string[];
-  force?: boolean;
-  volumes?: boolean;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
-}
-
-interface DockerLogsInput {
-  container: string;
-  follow?: boolean;
-  tail?: number;
-  since?: string;
-  timestamps?: boolean;
-  /** Ignored: use structured parameters only */
-  additional_args?: string;
+interface DockerInput {
+  command: string | string[];
 }

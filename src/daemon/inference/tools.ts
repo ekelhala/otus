@@ -19,12 +19,8 @@ export type ToolName =
   | "kill_terminal"
   | "wait"
   | "search_code"
-  | "docker-build"
-  | "docker-run"
-  | "docker-push"
-  | "docker-stop"
-  | "docker-rm"
-  | "docker-logs"
+  | "docker"
+  | "plan"
   | "task_complete";
 
 /**
@@ -279,185 +275,42 @@ export const tools: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "docker-build",
+      name: "docker",
       description:
-        "Build a Docker image on the HOST from a Dockerfile in the user's workspace root (not inside the sandbox VM).",
+        "Execute Docker commands on the HOST machine within the project workspace context (not inside the sandbox VM). All commands run with the workspace as the working directory. Use this for building images, running containers, managing Docker resources, etc.",
       parameters: {
         type: "object",
         properties: {
-          dockerfile: {
-            type: "string",
-            description:
-              "Path to Dockerfile relative to the workspace root (default: 'Dockerfile')",
-          },
-          tags: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "Image tags to apply (e.g., ['myapp:latest', 'myapp:v1.0'])",
-          },
-          build_args: {
-            type: "object",
-            description:
-              "Build-time variables as key-value pairs (e.g., {'NODE_VERSION': '18'})",
-          },
-        },
-        required: ["tags"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "docker-run",
-      description:
-        "Run a Docker container on the HOST (not inside the sandbox VM).",
-      parameters: {
-        type: "object",
-        properties: {
-          image: {
-            type: "string",
-            description: "Docker image to run (e.g., 'nginx:latest', 'myapp:v1')",
-          },
-          name: {
-            type: "string",
-            description: "Container name for easy reference",
-          },
-          ports: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "Port mappings in format 'host:container' (e.g., ['8080:80', '3000:3000'])",
-          },
-          environment: {
-            type: "object",
-            description:
-              "Environment variables as key-value pairs (e.g., {'NODE_ENV': 'production'})",
-          },
-          detach: {
-            type: "boolean",
-            description:
-              "Run container in background (default: true)",
-          },
           command: {
-            type: "string",
+            oneOf: [
+              { type: "string" },
+              { type: "array", items: { type: "string" } }
+            ],
             description:
-              "Command to run in container (overrides image CMD)",
+              "Docker command to execute. Can be a string (e.g., 'build -t myapp:latest .') or array (e.g., ['build', '-t', 'myapp:latest', '.']). Common commands: build, run, push, pull, logs, ps, stop, rm, exec, compose. The workspace directory is automatically set as the working directory.",
           },
         },
-        required: ["image"],
+        required: ["command"],
       },
     },
   },
   {
     type: "function",
     function: {
-      name: "docker-push",
+      name: "plan",
       description:
-        "Push a Docker image to a container registry from the HOST environment (not inside the sandbox VM).",
+        "Break down a complex task into clear, sequential steps. Use this when the user's request requires multiple distinct actions or phases. Each step should be focused and actionable. After calling this tool, you'll work through each step one at a time.",
       parameters: {
         type: "object",
         properties: {
-          image: {
-            type: "string",
-            description:
-              "Image name and tag to push (e.g., 'username/myapp:latest', 'ghcr.io/user/app:v1')",
-          },
-        },
-        required: ["image"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "docker-stop",
-      description:
-        "Stop one or more running Docker containers on the HOST environment.",
-      parameters: {
-        type: "object",
-        properties: {
-          containers: {
+          steps: {
             type: "array",
             items: { type: "string" },
             description:
-              "Container names or IDs to stop (e.g., ['web-server', 'db'])",
-          },
-          timeout: {
-            type: "number",
-            description:
-              "Seconds to wait before killing container (default: 10)",
+              "Array of step descriptions. Each step should be clear and actionable, representing one focused task to complete.",
           },
         },
-        required: ["containers"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "docker-logs",
-      description:
-        "Fetch logs from a Docker container on the HOST environment.",
-      parameters: {
-        type: "object",
-        properties: {
-          container: {
-            type: "string",
-            description: "Container name or ID to get logs from",
-          },
-          follow: {
-            type: "boolean",
-            description:
-              "Follow log output in real-time (default: false)",
-          },
-          tail: {
-            type: "number",
-            description:
-              "Number of lines to show from end of logs (default: all)",
-          },
-          since: {
-            type: "string",
-            description:
-              "Show logs since timestamp or relative (e.g., '2023-01-01T00:00:00', '10m')",
-          },
-          timestamps: {
-            type: "boolean",
-            description:
-              "Show timestamps with log entries (default: false)",
-          },
-        },
-        required: ["container"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "docker-rm",
-      description:
-        "Remove one or more Docker containers from the HOST environment. Containers must be stopped first unless force is used.",
-      parameters: {
-        type: "object",
-        properties: {
-          containers: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "Container names or IDs to remove (e.g., ['web-server', 'db'])",
-          },
-          force: {
-            type: "boolean",
-            description:
-              "Force removal of running containers (default: false)",
-          },
-          volumes: {
-            type: "boolean",
-            description:
-              "Remove associated anonymous volumes (default: false)",
-          },
-        },
-        required: ["containers"],
+        required: ["steps"],
       },
     },
   },
