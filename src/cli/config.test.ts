@@ -108,7 +108,7 @@ describe("otus config command", () => {
     await $`bun run src/cli/otus.ts config set voyage_api_key key2`.quiet();
     
     const list = await $`bun run src/cli/otus.ts config list`.text();
-    expect(list).toContain("openrouter_api_key    ✓ configured");
-    expect(list).toContain("voyage_api_key       ✓ configured");
+    expect(list).toMatch(/openrouter_api_key\s+✓ configured/);
+    expect(list).toMatch(/voyage_api_key\s+✓ configured/);
   });
 });

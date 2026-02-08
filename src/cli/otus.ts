@@ -35,6 +35,7 @@ function getApiKeys(workspacePath: string): {
   openrouterApiKey: string;
   voyageApiKey: string;
   model?: string;
+  maxIterations?: number;
 } {
   const credentials = readCredentials();
 
@@ -70,6 +71,9 @@ function getApiKeys(workspacePath: string): {
     openrouterApiKey,
     voyageApiKey,
     model: credentials.model || undefined,
+    maxIterations: credentials.max_iterations
+      ? Number.parseInt(credentials.max_iterations, 10)
+      : undefined,
   };
 }
 
@@ -371,6 +375,7 @@ program
   .description("Initialize Otus in the current workspace")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
   .option("-v, --verbose", "Show detailed debug output")
+  .option("--max-iterations <n>", "Maximum ReAct iterations before prompting to continue")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (options) => {
     const logger = initLogger(options.verbose);
@@ -410,11 +415,20 @@ program
         logger.succeedSpinner("All prerequisites met");
       }
 
+      const maxIterations = options.maxIterations !== undefined
+        ? Number.parseInt(String(options.maxIterations), 10)
+        : undefined;
+      if (maxIterations !== undefined && (!Number.isFinite(maxIterations) || maxIterations < 1)) {
+        logger.error("Invalid --max-iterations (must be a positive integer)");
+        process.exit(1);
+      }
+
       logger.startSpinner("Initializing workspace...");
       await client.init({
         workspacePath,
         ...apiKeys,
         verbose: options.verbose,
+        maxIterations,
       });
       logger.succeedSpinner("Otus initialized successfully!");
       
@@ -437,6 +451,7 @@ program
   .description("Start an interactive chat session with Otus")
   .option("-d, --dir <path>", "Workspace directory", process.cwd())
   .option("-v, --verbose", "Show detailed debug output")
+  .option("--max-iterations <n>", "Maximum ReAct iterations before prompting to continue")
   .option("--skip-checks", "Skip prerequisite checks (not recommended)")
   .action(async (options) => {
     const logger = initLogger(options.verbose);
@@ -475,18 +490,31 @@ program
         logger.succeedSpinner("Prerequisites OK");
       }
 
+      const maxIterations = options.maxIterations !== undefined
+        ? Number.parseInt(String(options.maxIterations), 10)
+        : undefined;
+      if (maxIterations !== undefined && (!Number.isFinite(maxIterations) || maxIterations < 1)) {
+        logger.error("Invalid --max-iterations (must be a positive integer)");
+        process.exit(1);
+      }
+
       // Initialize workspace in daemon
       logger.startSpinner("Initializing...");
       await client.init({
         workspacePath,
         ...apiKeys,
         verbose: options.verbose,
+        maxIterations,
       });
       logger.succeedSpinner("Ready");
 
       // Start chat session
       logger.startSpinner("Creating session...");
-      const { sessionId, model } = await client.createSession({ workspacePath });
+      const sessionMaxIterations = maxIterations ?? apiKeys.maxIterations;
+      const { sessionId, model } = await client.createSession({
+        workspacePath,
+        maxIterations: sessionMaxIterations,
+      });
       logger.succeedSpinner("Session created");
 
       // Display welcome banner with Otus creature

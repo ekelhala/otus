@@ -15,6 +15,7 @@ interface InitRequest {
   voyageApiKey: string;
   verbose?: boolean;
   model?: string;
+  maxIterations?: number;
 }
 
 interface PrerequisitesRequest {
@@ -23,6 +24,7 @@ interface PrerequisitesRequest {
 
 interface CreateSessionRequest {
   workspacePath: string;
+  maxIterations?: number;
 }
 
 interface SendMessageRequest {
@@ -168,7 +170,7 @@ export class DaemonServer {
    * Initialize a workspace
    */
   private async handleInit(body: InitRequest): Promise<Response> {
-    const { workspacePath, openrouterApiKey, voyageApiKey, verbose, model } = body;
+    const { workspacePath, openrouterApiKey, voyageApiKey, verbose, model, maxIterations } = body;
 
     // Check if already initialized
     if (this.workspaces.has(workspacePath)) {
@@ -176,6 +178,9 @@ export class DaemonServer {
       
       // Update model if it changed
       context.updateModel(model);
+
+      // Update maxIterations if it changed
+      context.updateMaxIterations(maxIterations);
       
       return new Response(
         JSON.stringify({ message: "Workspace already initialized" }),
@@ -190,6 +195,7 @@ export class DaemonServer {
       voyageApiKey,
       verbose,
       model,
+      maxIterations,
     });
 
     this.workspaces.set(workspacePath, context);
@@ -204,7 +210,7 @@ export class DaemonServer {
    * Create a new chat session
    */
   private async handleCreateSession(body: CreateSessionRequest): Promise<Response> {
-    const { workspacePath } = body;
+    const { workspacePath, maxIterations } = body;
 
     const context = this.workspaces.get(workspacePath);
     if (!context) {
@@ -214,7 +220,7 @@ export class DaemonServer {
       );
     }
 
-    const { sessionId, model } = context.startSession();
+    const { sessionId, model } = context.startSession({ maxIterations });
     this.sessions.set(sessionId, { workspacePath, sessionId });
 
     return new Response(

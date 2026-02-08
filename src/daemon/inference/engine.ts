@@ -30,6 +30,7 @@ export class InferenceEngine {
   private readonly episodicMemory: InferenceEngineConfig["episodicMemory"];
   private readonly logger: InferenceEngineConfig["logger"];
   private readonly model: string;
+  private readonly maxIterations: number;
   private readonly contextBuilder: ContextBuilder;
   private readonly conversation: Conversation;
   private readonly plan: PlanState;
@@ -63,6 +64,7 @@ export class InferenceEngine {
     this.episodicMemory = config.episodicMemory;
     this.logger = config.logger;
     this.model = config.model || "google/gemini-2.5-flash";
+    this.maxIterations = this.normalizeMaxIterations(config.maxIterations);
     this.contextBuilder = new ContextBuilder(config.contextConfig);
     this.conversation = new Conversation(config.logger);
     this.plan = new PlanState();
@@ -190,10 +192,10 @@ export class InferenceEngine {
     let completionSummary: string | undefined;
 
     try {
-      while (iteration < EXECUTION.MAX_ITERATIONS && !turnComplete) {
+      while (iteration < this.maxIterations && !turnComplete) {
         iteration++;
         this.currentIteration++;
-        yield { type: "iteration", current: this.currentIteration, max: EXECUTION.MAX_ITERATIONS };
+        yield { type: "iteration", current: this.currentIteration, max: this.maxIterations };
 
         const result = yield* this.processIteration(iteration);
 
@@ -227,7 +229,7 @@ export class InferenceEngine {
         }
       }
 
-      if (iteration >= EXECUTION.MAX_ITERATIONS) {
+      if (iteration >= this.maxIterations) {
         this.logger.debug("Max iterations reached, prompting for continuation");
         this.awaitingContinuation = true;
         
@@ -279,7 +281,7 @@ export class InferenceEngine {
   private async *processIteration(
     iteration: number
   ): AsyncGenerator<InferenceEvent, IterationResult> {
-    this.logger.iteration(iteration, EXECUTION.MAX_ITERATIONS);
+    this.logger.iteration(iteration, this.maxIterations);
 
     // Log thinking phase
     this.episodicMemory.logEvent(this.sessionId, "think", {
@@ -389,6 +391,18 @@ export class InferenceEngine {
       this.conversation.promptForAction();
     }
     return { complete: false };
+  }
+
+  private normalizeMaxIterations(value: unknown): number {
+    const fallback = EXECUTION.MAX_ITERATIONS;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return fallback;
+    }
+    const normalized = Math.floor(value);
+    if (normalized < 1) {
+      return fallback;
+    }
+    return normalized;
   }
 
   /**

@@ -24,6 +24,8 @@ export interface WorkspaceConfig {
   verbose?: boolean;
   /** OpenRouter model identifier (overrides default) */
   model?: string;
+  /** Maximum number of ReAct loop iterations before prompting to continue (defaults to 50) */
+  maxIterations?: number;
 }
 
 /**
@@ -257,7 +259,7 @@ coverage
   /**
    * Start a new chat session
    */
-  startSession(): { sessionId: string; model: string } {
+  startSession(options?: { maxIterations?: number }): { sessionId: string; model: string } {
     if (!this.episodicMemory || !this.semanticMemory) {
       throw new Error("Workspace not initialized");
     }
@@ -275,6 +277,7 @@ coverage
       workspacePath: this.config.workspacePath,
       logger: this.logger,
       model: this.config.model,
+      maxIterations: options?.maxIterations ?? this.config.maxIterations,
     });
 
     const sessionId = engine.startSession();
@@ -320,6 +323,26 @@ coverage
     this.config.model = model;
 
     // Applies to NEW sessions only. Existing sessions keep their current engine/model.
+  }
+
+  /**
+   * Update max iterations configuration.
+   * Applies to NEW sessions only. Existing sessions keep their current engine/maxIterations.
+   */
+  updateMaxIterations(maxIterations?: number): void {
+    if (typeof maxIterations !== "number" || !Number.isFinite(maxIterations)) {
+      return;
+    }
+
+    const normalized = Math.floor(maxIterations);
+    if (normalized < 1 || this.config.maxIterations === normalized) {
+      return;
+    }
+
+    this.logger.debug(
+      `Updating maxIterations from ${this.config.maxIterations ?? "default"} to ${normalized}`
+    );
+    this.config.maxIterations = normalized;
   }
 
   /**

@@ -219,6 +219,7 @@ export const CREDENTIAL_KEYS = [
   "openrouter_api_key",
   "voyage_api_key",
   "model",
+  "max_iterations",
 ] as const;
 
 export type CredentialKey = typeof CREDENTIAL_KEYS[number];

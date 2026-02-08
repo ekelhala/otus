@@ -35,6 +35,8 @@ export interface InferenceEngineConfig {
   logger: Logger;
   /** OpenRouter model identifier */
   model?: string;
+  /** Maximum number of ReAct loop iterations before prompting to continue (defaults to 50) */
+  maxIterations?: number;
   /** Context builder configuration (optional, uses defaults if not provided) */
   contextConfig?: Partial<ContextBuilderConfig>;
 }

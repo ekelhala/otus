@@ -25,10 +25,12 @@ export interface InitOptions {
   voyageApiKey: string;
   verbose?: boolean;
   model?: string;
+  maxIterations?: number;
 }
 
 export interface SessionOptions {
   workspacePath: string;
+  maxIterations?: number;
 }
 
 /**
