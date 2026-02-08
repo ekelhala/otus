@@ -9,6 +9,7 @@ import type { Logger } from "@shared/logger.ts";
 import { LLM } from "@shared/constants.ts";
 import type { ToolName } from "./tools.ts";
 import { isAbsolute, normalize } from "node:path";
+import { readFile } from "node:fs/promises";
 
 export interface ToolHandlersConfig {
   sandboxManager: SandboxManager;
@@ -28,12 +29,92 @@ export class ToolHandlers {
   private readonly workspacePath: string;
   private readonly logger: Logger;
 
+  // Per-(sandbox, terminal) read state to support incremental reads.
+  // Stores a snapshot of the last observed capture-pane output.
+  private readonly terminalReadState = new Map<
+    string,
+    {
+      lastOutput: string;
+      lastReadAt: number;
+    }
+  >();
+
+  // Auto-sync state: keep host reasonably up-to-date without requiring the model
+  // to remember to sync after every workspace change.
+  private autoSyncDirty = false;
+  private autoSyncInFlight = false;
+  private lastAutoSyncAt = 0;
+  private autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(config: ToolHandlersConfig) {
     this.sandboxManager = config.sandboxManager;
     this.episodicMemory = config.episodicMemory;
     this.semanticMemory = config.semanticMemory;
     this.workspacePath = config.workspacePath;
     this.logger = config.logger;
+  }
+
+  private markWorkspaceDirty(): void {
+    this.autoSyncDirty = true;
+  }
+
+  private scheduleAutoSync(delayMs: number, reason: string): void {
+    if (this.autoSyncTimer) {
+      clearTimeout(this.autoSyncTimer);
+      this.autoSyncTimer = null;
+    }
+
+    this.autoSyncTimer = setTimeout(() => {
+      this.autoSyncTimer = null;
+      void this.tryAutoSync(reason);
+    }, delayMs);
+  }
+
+  private async tryAutoSync(reason: string): Promise<void> {
+    if (this.autoSyncInFlight) return;
+    if (!this.autoSyncDirty) return;
+
+    // Don’t auto-sync too frequently.
+    const MIN_INTERVAL_MS = 15_000;
+    if (Date.now() - this.lastAutoSyncAt < MIN_INTERVAL_MS) return;
+
+    const active = this.sandboxManager.getActiveSandbox();
+    if (!active) return;
+
+    this.autoSyncInFlight = true;
+    try {
+      // Overlay-only: avoids deleting host files while a command is mid-flight.
+      await this.sandboxManager.syncFromSandbox(undefined, { mirror: false });
+      this.lastAutoSyncAt = Date.now();
+      this.autoSyncDirty = false;
+      this.logger.debug(`Auto-synced workspace from sandbox (${reason})`);
+    } catch (err) {
+      // Keep dirty so we can retry later.
+      this.logger.debug(`Auto-sync failed (${reason}): ${String(err)}`);
+    } finally {
+      this.autoSyncInFlight = false;
+    }
+  }
+
+  private terminalStateKey(sandboxId: string, terminalName: string): string {
+    return `${sandboxId}:${terminalName}`;
+  }
+
+  private computeIncrementalDelta(current: string, previous: string): string | null {
+    if (!previous) return current;
+    if (current === previous) return "";
+    if (current.startsWith(previous)) {
+      return current.slice(previous.length);
+    }
+
+    // Fall back to overlap search (handles tmux history shifts or snapshot truncation).
+    const OVERLAP_CHARS = 4000;
+    const needle = previous.length > OVERLAP_CHARS ? previous.slice(-OVERLAP_CHARS) : previous;
+    if (!needle) return current;
+
+    const idx = current.lastIndexOf(needle);
+    if (idx === -1) return null;
+    return current.slice(idx + needle.length);
   }
 
   /**
@@ -51,11 +132,11 @@ export class ToolHandlers {
       case "stop_sandbox":
         return await this.stopSandbox(input as StopSandboxInput);
 
-      case "list_sandboxes":
-        return await this.listSandboxes();
-
       case "sync_workspace":
         return await this.syncWorkspace(input as SyncWorkspaceInput);
+
+      case "get_otusignore":
+        return await this.getOtusIgnore();
 
       case "start_terminal":
         return await this.startTerminal(input as StartTerminalInput);
@@ -92,6 +173,40 @@ export class ToolHandlers {
     }
   }
 
+  private async getOtusIgnore(): Promise<string> {
+    // .otusignore lives in the HOST workspace; it controls what is excluded from sync
+    // in BOTH directions.
+    const ignorePath = `${this.workspacePath}/.otusignore`;
+
+    let patterns: string[] = [];
+    try {
+      const content = await readFile(ignorePath, "utf-8");
+      patterns = content
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"));
+    } catch {
+      patterns = [];
+    }
+
+    const lines: string[] = [];
+    lines.push(".otusignore exclude patterns (applied during sync to/from sandbox):");
+    if (patterns.length === 0) {
+      lines.push("- (none)");
+    } else {
+      for (const p of patterns) lines.push(`- ${p}`);
+    }
+
+    lines.push("");
+    lines.push("Notes:");
+    lines.push("- These patterns exclude paths from BOTH sync directions.");
+    lines.push("- The .otus/ directory is protected and never synced.");
+    lines.push("- The .otusignore file itself is always included in sync.");
+    lines.push("- If a file is excluded, host and sandbox can diverge for that path.");
+
+    return lines.join("\n");
+  }
+
   /**
    * Start a new sandbox VM
    */
@@ -100,7 +215,7 @@ export class ToolHandlers {
 
     // Sync workspace by default unless explicitly disabled
     if (input.sync_workspace !== false) {
-      const syncResult = await this.sandboxManager.syncToSandbox(sandbox.id);
+      const syncResult = await this.sandboxManager.syncToSandbox();
       return `Sandbox started successfully.
 ID: ${sandbox.id}
 ${sandbox.name ? `Name: ${sandbox.name}` : ""}
@@ -120,41 +235,16 @@ Workspace not synced (use sync_workspace to push files)`;
    */
   private async stopSandbox(input: StopSandboxInput): Promise<string> {
     const syncBack = input.sync_back !== false; // Default to true
-    const sandboxId = input.sandbox_id;
-
-    if (sandboxId) {
-      await this.sandboxManager.stopSandbox(sandboxId, syncBack);
-      return `Sandbox ${sandboxId} stopped. Workspace ${syncBack ? "synced back" : "not synced"}.`;
-    } else {
-      const activeSandbox = this.sandboxManager.getActiveSandbox();
-      if (!activeSandbox) {
-        return "No active sandbox to stop.";
-      }
-      await this.sandboxManager.stopSandbox(activeSandbox.id, syncBack);
-      return `Sandbox ${activeSandbox.id} stopped. Workspace ${syncBack ? "synced back" : "not synced"}.`;
-    }
-  }
-
-  /**
-   * List all running sandboxes
-   */
-  private async listSandboxes(): Promise<string> {
-    const sandboxes = await this.sandboxManager.listSandboxes();
-
-    if (sandboxes.length === 0) {
-      return "No sandboxes running. Use start_sandbox to create one.";
-    }
 
     const activeSandbox = this.sandboxManager.getActiveSandbox();
-    const lines = sandboxes.map((sb) => {
-      const isActive = activeSandbox?.id === sb.id ? " [ACTIVE]" : "";
-      return `- ${sb.id}${sb.name ? ` (${sb.name})` : ""}${isActive}
-  IP: ${sb.guestIp || "no network"}
-  Uptime: ${sb.uptime.toFixed(0)}s
-  Workspace: ${sb.workspaceSynced ? "synced" : "not synced"}`;
-    });
+    if (!activeSandbox) {
+      return "No sandbox is running.";
+    }
 
-    return `Running sandboxes:\n${lines.join("\n")}`;
+    await this.sandboxManager.stopSandbox(activeSandbox.id, syncBack);
+    // Drop any incremental terminal read state: terminals are sandbox-scoped.
+    this.terminalReadState.clear();
+    return `Sandbox stopped. Workspace ${syncBack ? "synced back" : "not synced"}.`;
   }
 
   /**
@@ -162,10 +252,13 @@ Workspace not synced (use sync_workspace to push files)`;
    */
   private async syncWorkspace(input: SyncWorkspaceInput): Promise<string> {
     if (input.direction === "to_sandbox") {
-      const result = await this.sandboxManager.syncToSandbox(input.sandbox_id);
+      const result = await this.sandboxManager.syncToSandbox();
       return `Synced ${result.filesWritten} files to sandbox.`;
     } else {
-      const result = await this.sandboxManager.syncFromSandbox(input.sandbox_id);
+      // Explicit sync should mirror (including deletion of stale host paths).
+      const result = await this.sandboxManager.syncFromSandbox(undefined, { mirror: true });
+      this.lastAutoSyncAt = Date.now();
+      this.autoSyncDirty = false;
       return `Synced ${(result.size / 1024).toFixed(1)}KB from sandbox to host.`;
     }
   }
@@ -227,7 +320,7 @@ ${result.content}
    * Start a terminal session in the sandbox
    */
   private async startTerminal(input: StartTerminalInput): Promise<string> {
-    const sandbox = this.getSandbox(input.sandbox_id);
+    const sandbox = this.getSandbox();
     const result = await sandbox.agentClient.startSession(input.name);
 
     if (!result.success) {
@@ -242,12 +335,17 @@ ${result.content}
    * Send a command to a terminal session
    */
   private async sendToTerminal(input: SendToTerminalInput): Promise<string> {
-    const sandbox = this.getSandbox(input.sandbox_id);
+    const sandbox = this.getSandbox();
     const result = await sandbox.agentClient.sendToSession(input.name, input.command);
 
     if (!result.success) {
       return `Failed to send to terminal: ${result.error}`;
     }
+
+    // Any terminal command might touch the workspace.
+    this.markWorkspaceDirty();
+    // Debounced: give the command a moment to run before syncing.
+    this.scheduleAutoSync(10_000, "send_to_terminal");
 
     this.logger.toolResult("send_to_terminal", `Sent to ${input.name}: ${input.command.substring(0, 50)}...`);
     return `Command sent to terminal '${input.name}'.\nUse read_terminal to check output.`;
@@ -257,23 +355,85 @@ ${result.content}
    * Read output from a terminal session
    */
   private async readTerminal(input: ReadTerminalInput): Promise<string> {
-    const sandbox = this.getSandbox(input.sandbox_id);
+    const sandbox = this.getSandbox();
     const result = await sandbox.agentClient.readSession(input.name, input.lines);
 
     if (!result.success) {
       return `Failed to read terminal: ${result.error}`;
     }
 
-    const preview = result.output.substring(0, 200);
-    this.logger.toolResult("read_terminal", `${preview}${result.output.length > 200 ? "..." : ""}`);
-    return result.output || "[no output]";
+    // If we’ve recently run commands, reading output is a good point to sync back.
+    if (this.autoSyncDirty) {
+      this.scheduleAutoSync(2_000, "read_terminal");
+    }
+
+    const linesRequested = input.lines ?? 1000;
+    const rawOutput = result.output ?? "";
+    // Normalize CRLF to LF for consistency. This keeps the output semantically the same,
+    // while avoiding confusing \r artifacts in model inputs.
+    const output = rawOutput.replace(/\r\n/g, "\n");
+
+    const preview = output.substring(0, 200);
+    this.logger.toolResult(
+      "read_terminal",
+      `${preview}${output.length > 200 ? "..." : ""}`
+    );
+
+    // Keep output as close as possible to a real terminal: return captured pane text verbatim,
+    // with minimal, easy-to-parse delimiters. Support incremental reads by default.
+    const incremental = input.incremental !== false;
+    const key = this.terminalStateKey(sandbox.id, input.name);
+    const prev = this.terminalReadState.get(key);
+
+    // Avoid unbounded memory growth: store at most the last N chars.
+    const STATE_MAX_CHARS = 100_000;
+    const snapshot = output.length > STATE_MAX_CHARS ? output.slice(-STATE_MAX_CHARS) : output;
+
+    let mode: "full" | "delta" | "none" = "full";
+    let payload = output;
+
+    if (incremental && prev) {
+      const delta = this.computeIncrementalDelta(output, prev.lastOutput);
+      if (delta === "") {
+        mode = "none";
+        payload = "";
+      } else if (delta === null) {
+        mode = "full";
+        payload = output;
+      } else {
+        mode = "delta";
+        payload = delta;
+      }
+    }
+
+    this.terminalReadState.set(key, {
+      lastOutput: snapshot,
+      lastReadAt: Date.now(),
+    });
+
+    const header = `# read_terminal terminal=${input.name} lines_requested=${linesRequested} chars=${output.length} mode=${mode}`;
+    const begin =
+      mode === "delta"
+        ? "----- BEGIN TERMINAL NEW OUTPUT (delta) -----"
+        : "----- BEGIN TERMINAL OUTPUT -----";
+    const end =
+      mode === "delta"
+        ? "----- END TERMINAL NEW OUTPUT (delta) -----"
+        : "----- END TERMINAL OUTPUT -----";
+
+    if (!payload.trim()) {
+      return `${header}\n${begin}\n${end}`;
+    }
+
+    const maybeNewline = payload.endsWith("\n") ? "" : "\n";
+    return `${header}\n${begin}\n${payload}${maybeNewline}${end}`;
   }
 
   /**
    * List active terminal sessions
    */
   private async listTerminals(input: ListTerminalsInput): Promise<string> {
-    const sandbox = this.getSandbox(input.sandbox_id);
+    const sandbox = this.getSandbox();
     const result = await sandbox.agentClient.listSessions();
 
     if (result.sessions.length === 0) {
@@ -291,12 +451,19 @@ ${result.content}
    * Kill a terminal session
    */
   private async killTerminal(input: KillTerminalInput): Promise<string> {
-    const sandbox = this.getSandbox(input.sandbox_id);
+    const sandbox = this.getSandbox();
     const result = await sandbox.agentClient.killSession(input.name);
 
     if (!result.success) {
       return `Failed to kill terminal: ${result.error}`;
     }
+
+    // Clear incremental read state for this terminal.
+    this.terminalReadState.delete(this.terminalStateKey(sandbox.id, input.name));
+
+    // Terminal stop often signals work is done.
+    this.markWorkspaceDirty();
+    this.scheduleAutoSync(1_000, "kill_terminal");
 
     this.logger.toolResult("kill_terminal", `Killed terminal: ${input.name}`);
     return `Terminal '${input.name}' terminated.`;
@@ -351,7 +518,10 @@ ${result.content}
     if (subcommand === "build") {
       const activeSandbox = this.sandboxManager.getActiveSandbox();
       if (activeSandbox) {
-        const syncResult = await this.sandboxManager.syncFromSandbox(activeSandbox.id);
+        // For docker builds, we want the host build context to mirror the sandbox.
+        const syncResult = await this.sandboxManager.syncFromSandbox(undefined, { mirror: true });
+        this.lastAutoSyncAt = Date.now();
+        this.autoSyncDirty = false;
         syncMessage = `[Auto-synced ${(syncResult.size / 1024).toFixed(1)}KB from sandbox to host]\n`;
         this.logger.debug("Auto-synced workspace before docker build");
       }
@@ -389,13 +559,6 @@ ${result.content}
    * Helper to get sandbox by ID or active sandbox
    */
   private getSandbox(sandboxId?: string) {
-    if (sandboxId) {
-      const sandbox = this.sandboxManager.getSandbox(sandboxId);
-      if (!sandbox) {
-        throw new Error(`Sandbox not found: ${sandboxId}`);
-      }
-      return sandbox;
-    }
     const active = this.sandboxManager.getActiveSandbox();
     if (!active) {
       throw new Error("No active sandbox. Start one with start_sandbox first.");
@@ -436,13 +599,11 @@ interface StartSandboxInput {
 }
 
 interface StopSandboxInput {
-  sandbox_id?: string;
   sync_back?: boolean;
 }
 
 interface SyncWorkspaceInput {
   direction: "to_sandbox" | "from_sandbox";
-  sandbox_id?: string;
 }
 
 interface SearchCodeInput {
@@ -461,28 +622,24 @@ interface TaskCompleteInput {
 
 interface StartTerminalInput {
   name: string;
-  sandbox_id?: string;
 }
 
 interface SendToTerminalInput {
   name: string;
   command: string;
-  sandbox_id?: string;
 }
 
 interface ReadTerminalInput {
   name: string;
   lines?: number;
-  sandbox_id?: string;
+  /** When true (default), return only new output since last read for this terminal. */
+  incremental?: boolean;
 }
 
-interface ListTerminalsInput {
-  sandbox_id?: string;
-}
+interface ListTerminalsInput {}
 
 interface KillTerminalInput {
   name: string;
-  sandbox_id?: string;
 }
 
 interface WaitInput {

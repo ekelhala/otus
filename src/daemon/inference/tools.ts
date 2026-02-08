@@ -10,8 +10,8 @@ import type OpenAI from "openai";
 export type ToolName =
   | "start_sandbox"
   | "stop_sandbox"
-  | "list_sandboxes"
   | "sync_workspace"
+  | "get_otusignore"
   | "start_terminal"
   | "send_to_terminal"
   | "read_terminal"
@@ -32,7 +32,7 @@ export const tools: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "start_sandbox",
       description:
-        "Start a new isolated VM sandbox environment. The sandbox provides a safe Linux environment for executing commands. You must start a sandbox before running commands. You can have multiple sandboxes running simultaneously for testing different configurations.",
+        "Start the isolated VM sandbox environment. The sandbox provides a safe Linux environment for executing commands. You must start the sandbox before running commands. Only one sandbox is supported at a time; calling start_sandbox again returns the existing sandbox.",
       parameters: {
         type: "object",
         properties: {
@@ -60,11 +60,6 @@ export const tools: OpenAI.ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          sandbox_id: {
-            type: "string",
-            description:
-              "ID of the sandbox to stop. If not provided, stops the active sandbox.",
-          },
           sync_back: {
             type: "boolean",
             description:
@@ -78,22 +73,9 @@ export const tools: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "list_sandboxes",
-      description:
-        "List all running sandboxes with their status, uptime, and IP addresses.",
-      parameters: {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "sync_workspace",
       description:
-        "Sync workspace files between host and sandbox. Use 'to_sandbox' to push files to the VM, or 'from_sandbox' to pull changes back to host.",
+        "Sync workspace files between host and sandbox. Uses patterns from .otusignore to EXCLUDE files/paths from sync in BOTH directions. Use 'to_sandbox' to push files to the VM, or 'from_sandbox' to pull changes back to host.",
       parameters: {
         type: "object",
         properties: {
@@ -103,13 +85,21 @@ export const tools: OpenAI.ChatCompletionTool[] = [
             description:
               "Direction of sync: 'to_sandbox' pushes host files to VM, 'from_sandbox' pulls VM changes to host",
           },
-          sandbox_id: {
-            type: "string",
-            description:
-              "ID of the sandbox to sync with. If not provided, uses the active sandbox.",
-          },
         },
         required: ["direction"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_otusignore",
+      description:
+        "Show the active .otusignore exclude patterns used during workspace sync (to/from sandbox). Use this when you are unsure why a file didn’t sync.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
       },
     },
   },
@@ -125,10 +115,6 @@ export const tools: OpenAI.ChatCompletionTool[] = [
           name: {
             type: "string",
             description: "Unique name for this terminal (e.g., 'server', 'build', 'tests')",
-          },
-          sandbox_id: {
-            type: "string",
-            description: "ID of the sandbox. If not provided, uses the active sandbox.",
           },
         },
         required: ["name"],
@@ -152,10 +138,6 @@ export const tools: OpenAI.ChatCompletionTool[] = [
             type: "string",
             description: "The command to execute in the terminal",
           },
-          sandbox_id: {
-            type: "string",
-            description: "ID of the sandbox. If not provided, uses the active sandbox.",
-          },
         },
         required: ["name", "command"],
       },
@@ -166,7 +148,7 @@ export const tools: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "read_terminal",
       description:
-        "Read the current output/history from a terminal session. Shows what's currently visible in the terminal. Use this to check command results, see server logs, or check for errors.",
+        "Read output/history from a terminal session (tmux capture-pane). By default, returns only NEW output since the last read for that terminal (incremental). Set incremental=false to return the full captured output.",
       parameters: {
         type: "object",
         properties: {
@@ -178,9 +160,10 @@ export const tools: OpenAI.ChatCompletionTool[] = [
             type: "number",
             description: "Number of lines of output to capture (default: 1000)",
           },
-          sandbox_id: {
-            type: "string",
-            description: "ID of the sandbox. If not provided, uses the active sandbox.",
+          incremental: {
+            type: "boolean",
+            description:
+              "When true (default), return only output appended since last read for this terminal. When false, return the full capture-pane output.",
           },
         },
         required: ["name"],
@@ -196,10 +179,6 @@ export const tools: OpenAI.ChatCompletionTool[] = [
       parameters: {
         type: "object",
         properties: {
-          sandbox_id: {
-            type: "string",
-            description: "ID of the sandbox. If not provided, uses the active sandbox.",
-          },
         },
         required: [],
       },
@@ -217,10 +196,6 @@ export const tools: OpenAI.ChatCompletionTool[] = [
           name: {
             type: "string",
             description: "Name of the terminal to kill",
-          },
-          sandbox_id: {
-            type: "string",
-            description: "ID of the sandbox. If not provided, uses the active sandbox.",
           },
         },
         required: ["name"],
