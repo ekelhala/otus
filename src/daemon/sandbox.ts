@@ -1,6 +1,6 @@
 /**
  * Sandbox Manager
- * Manages multiple Firecracker VM sandboxes that can be created/destroyed via tool calls
+ * Manages a Firecracker VM sandbox that can be created/destroyed via tool calls
  */
 
 import { existsSync, writeFileSync, readFileSync } from "fs";
@@ -57,7 +57,11 @@ export interface SandboxManagerConfig {
 }
 
 /**
- * Manages multiple VM sandboxes
+ * Manages VM sandboxes.
+ *
+ * NOTE: The agent/tool surface is single-sandbox-only. Internally we still track
+ * a map for bookkeeping, but `startSandbox()` will never create a second running
+ * sandbox in the same manager instance.
  */
 export class SandboxManager {
   private readonly sandboxes = new Map<string, Sandbox>();
@@ -107,6 +111,22 @@ export class SandboxManager {
    * Start a new sandbox VM (uses pool VM if available)
    */
   async startSandbox(name?: string): Promise<Sandbox> {
+    // Single-sandbox rule: if one is already running, return it.
+    // This keeps the agent UX simple and prevents accidental resource leaks.
+    if (this.sandboxes.size > 0) {
+      const active = this.getActiveSandbox() ?? Array.from(this.sandboxes.values())[0];
+      if (active) {
+        if (!this.activeSandboxId) {
+          this.activeSandboxId = active.id;
+        }
+        if (name && active.name !== name) {
+          active.name = name;
+        }
+        console.log(`[Sandbox] Sandbox already running: ${active.id}${active.name ? ` (${active.name})` : ""}`);
+        return active;
+      }
+    }
+
     // Try to get a pre-warmed VM from the pool
     const poolVM = vmPool.getVM();
     
@@ -394,7 +414,16 @@ export class SandboxManager {
   /**
    * Sync workspace from a sandbox
    */
-  async syncFromSandbox(sandboxId?: string): Promise<{ size: number }> {
+  async syncFromSandbox(
+    sandboxId?: string,
+    options?: {
+      /**
+       * When true (default), mirror sandbox state by deleting host paths not present in the snapshot.
+       * When false, only overlays extracted files onto the host (non-destructive).
+       */
+      mirror?: boolean;
+    }
+  ): Promise<{ size: number }> {
     const id = sandboxId || this.activeSandboxId;
     if (!id) {
       throw new Error("No active sandbox");
@@ -414,7 +443,7 @@ export class SandboxManager {
     }
 
     // Extract to workspace, then delete any stale host files not present in the sandbox snapshot.
-    // This mirrors the sandbox contents for the synced subset, while leaving excluded paths untouched.
+    // This mirrors the sandbox contents for the synced subset (optional), while leaving excluded paths untouched.
     const { mkdtemp } = await import("fs/promises");
     const tmpDir = await mkdtemp(join(tmpdir(), "otus-sync-"));
     const tarFile = join(tmpDir, "workspace.tar.gz");
@@ -438,11 +467,14 @@ export class SandboxManager {
       // 2) Build snapshot manifest from the tarball
       const snapshot = await this.getTarSnapshotPaths(tarFile);
 
-      // 3) Delete any host files/dirs not present in snapshot (except excluded paths)
-      await this.deleteStaleHostPaths({
-        snapshot,
-        excludes,
-      });
+      // 3) Optionally delete any host files/dirs not present in snapshot (except excluded paths)
+      const mirror = options?.mirror !== false;
+      if (mirror) {
+        await this.deleteStaleHostPaths({
+          snapshot,
+          excludes,
+        });
+      }
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

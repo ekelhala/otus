@@ -38,9 +38,13 @@ export class WorkspaceContext {
   private episodicMemory: EpisodicMemory | null = null;
   private semanticMemory: SemanticMemory | null = null;
   private voyageClient: VoyageClient | null = null;
-  private sandboxManager: SandboxManager | null = null;
-  private inferenceEngine: InferenceEngine | null = null;
-  private sessions: Map<string, { engine: InferenceEngine }> = new Map();
+  private sessions: Map<
+    string,
+    {
+      engine: InferenceEngine;
+      sandboxManager: SandboxManager;
+    }
+  > = new Map();
 
   private constructor(config: WorkspaceConfig) {
     this.config = config;
@@ -242,24 +246,8 @@ coverage
     this.semanticMemory.startWatching();
     this.logger.debug("File watcher started");
 
-    // Initialize sandbox manager (VMs are started on-demand by the agent)
-    this.sandboxManager = new SandboxManager({
-      workspacePath: this.config.workspacePath,
-      otusIgnoreFile: this.otusIgnoreFile,
-    });
-    this.logger.debug("Sandbox manager initialized");
-
-    // Initialize inference engine
-    this.inferenceEngine = new InferenceEngine({
-      apiKey: this.config.openrouterApiKey,
-      sandboxManager: this.sandboxManager,
-      episodicMemory: this.episodicMemory,
-      semanticMemory: this.semanticMemory,
-      workspacePath: this.config.workspacePath,
-      logger: this.logger,
-      model: this.config.model,
-    });
-    this.logger.debug("Inference engine initialized");
+    // NOTE: Session resources (SandboxManager + InferenceEngine) are created per session.
+    // This enables multiple concurrent sessions, each with exactly one sandbox.
 
     this.logger.debug("Initialization complete!");
     this.logger.debug(`Workspace: ${this.config.workspacePath}`);
@@ -270,14 +258,29 @@ coverage
    * Start a new chat session
    */
   startSession(): { sessionId: string; model: string } {
-    if (!this.inferenceEngine) {
+    if (!this.episodicMemory || !this.semanticMemory) {
       throw new Error("Workspace not initialized");
     }
 
-    const sessionId = this.inferenceEngine.startSession();
-    this.sessions.set(sessionId, { engine: this.inferenceEngine });
-    
-    return { sessionId, model: this.inferenceEngine.getModel() };
+    const sandboxManager = new SandboxManager({
+      workspacePath: this.config.workspacePath,
+      otusIgnoreFile: this.otusIgnoreFile,
+    });
+
+    const engine = new InferenceEngine({
+      apiKey: this.config.openrouterApiKey,
+      sandboxManager,
+      episodicMemory: this.episodicMemory,
+      semanticMemory: this.semanticMemory,
+      workspacePath: this.config.workspacePath,
+      logger: this.logger,
+      model: this.config.model,
+    });
+
+    const sessionId = engine.startSession();
+    this.sessions.set(sessionId, { engine, sandboxManager });
+
+    return { sessionId, model: engine.getModel() };
   }
 
   /**
@@ -292,6 +295,14 @@ coverage
    * End a session
    */
   endSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      // Best-effort cleanup: stop any sandbox started by this session.
+      // This intentionally does NOT affect other sessions.
+      session.sandboxManager
+        .stopAll()
+        .catch((err) => this.logger.debug(`Failed to stop session sandboxes: ${String(err)}`));
+    }
     this.sessions.delete(sessionId);
   }
 
@@ -308,19 +319,7 @@ coverage
     // Update config
     this.config.model = model;
 
-    // Reinitialize inference engine with new model
-    if (this.inferenceEngine && this.sandboxManager && this.episodicMemory && this.semanticMemory) {
-      this.inferenceEngine = new InferenceEngine({
-        apiKey: this.config.openrouterApiKey,
-        sandboxManager: this.sandboxManager,
-        episodicMemory: this.episodicMemory,
-        semanticMemory: this.semanticMemory,
-        workspacePath: this.config.workspacePath,
-        logger: this.logger,
-        model: this.config.model,
-      });
-      this.logger.debug("Inference engine reinitialized with new model");
-    }
+    // Applies to NEW sessions only. Existing sessions keep their current engine/model.
   }
 
   /**
@@ -336,10 +335,15 @@ coverage
   async shutdown(): Promise<void> {
     this.logger.debug("Shutting down workspace context...");
 
-    // Stop all sandboxes
-    if (this.sandboxManager && this.sandboxManager.hasSandboxes()) {
-      this.logger.debug("Stopping all sandboxes...");
-      await this.sandboxManager.stopAll();
+    // Stop sandboxes for all active sessions (each session owns its sandbox manager).
+    for (const { sandboxManager } of this.sessions.values()) {
+      try {
+        if (sandboxManager.hasSandboxes()) {
+          await sandboxManager.stopAll();
+        }
+      } catch (err) {
+        this.logger.debug(`Error stopping session sandboxes: ${String(err)}`);
+      }
     }
 
     if (this.semanticMemory) {
