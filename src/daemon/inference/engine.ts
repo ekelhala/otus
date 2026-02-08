@@ -336,20 +336,25 @@ export class InferenceEngine {
 
     // No tool calls - track consecutive misses and escalate prompts
     this.consecutiveNoToolCalls++;
-    this.logger.debug(`No tool calls (${this.consecutiveNoToolCalls} consecutive)`);
+    this.logger.debug(`No tool calls (${this.consecutiveNoToolCalls} consecutive), finish_reason=${response.choices[0]?.finish_reason}`);
 
-    if (this.consecutiveNoToolCalls >= 3) {
+    if (this.consecutiveNoToolCalls >= 4) {
       // Model is stuck in a loop - force completion to break out
-      this.logger.debug("Model stuck: 3 consecutive iterations without tool calls, forcing completion");
+      this.logger.debug("Model stuck: 4 consecutive iterations without tool calls, forcing completion");
       this.consecutiveNoToolCalls = 0;
       return { complete: true, summary: textContent || "Agent could not determine next action" };
     }
 
-    // Escalate the prompt on the second miss
-    if (this.consecutiveNoToolCalls === 2) {
+    // Escalate prompts progressively
+    if (this.consecutiveNoToolCalls >= 3) {
       this.messages.push({
         role: "user",
-        content: "You MUST call a tool now. If the task is done, call task_complete. Do not reply with text only.",
+        content: "You MUST call a tool NOW or call task_complete if finished. Responding with only text is not allowed.",
+      });
+    } else if (this.consecutiveNoToolCalls === 2) {
+      this.messages.push({
+        role: "user",
+        content: "You must call a tool. If the task is done, call task_complete. If you need to act, pick the most appropriate tool.",
       });
     } else {
       this.promptForAction();
@@ -622,8 +627,14 @@ export class InferenceEngine {
   ): OpenAI.ChatCompletionAssistantMessageParam {
     const clean: OpenAI.ChatCompletionAssistantMessageParam = {
       role: "assistant",
-      content: message.content ?? "",
     };
+
+    // Only set content if there's actual text
+    if (message.content && message.content.trim().length > 0) {
+      clean.content = message.content;
+    } else {
+      clean.content = null;
+    }
 
     if (message.tool_calls && message.tool_calls.length > 0) {
       clean.tool_calls = message.tool_calls

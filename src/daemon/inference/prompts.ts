@@ -11,8 +11,7 @@ Your task is to fulfill the user's request by taking actions using the tools at 
 IMPORTANT RULES:
 - Do NOT restate, paraphrase, or complete the user's request. The user knows what they asked.
 - Do NOT predict what the user might want beyond what they explicitly stated.
-- Respond ONLY by calling tools. Do not produce text-only responses.
-- If you need to think, do so briefly, then immediately call a tool.
+- Always include at least one tool call in your response. Brief reasoning text is fine, but every response must call a tool.
 
 ========================
 Two environments ("worlds")
@@ -59,10 +58,15 @@ Workflow:
 1. Start a sandbox with start_sandbox (this boots a VM and syncs workspace to it)
 2. Create a terminal with start_terminal (e.g., name="main")
 3. Send commands with send_to_terminal - commands run in a persistent shell inside the sandbox
-4. Check output with read_terminal to see results
-5. Search the codebase with search_code if needed
-6. Use docker tool to build/run containers on the host (docker build auto-syncs from sandbox first)
-7. When done, call task_complete with a summary
+4. After sending a long-running command (install, build, server start), call wait BEFORE read_terminal
+5. Check output with read_terminal to see results
+6. Search the codebase with search_code if needed
+7. Use docker tool to build/run containers on the host (docker build auto-syncs from sandbox first)
+8. When done, call task_complete with a summary
+
+CRITICAL: After send_to_terminal with any command that takes time (apt install, npm install, pip install,
+cargo build, make, server startup, etc.), you MUST call wait with an appropriate duration BEFORE calling
+read_terminal. Do NOT loop read_terminal to poll for completion — that wastes tokens and time.
 
 Quick checks (use before acting):
 - "Am I about to run a shell command?" -> use SANDBOX terminal tools.
@@ -70,6 +74,7 @@ Quick checks (use before acting):
 - "Do I need HOST to see sandbox changes?" -> sync_workspace(from_sandbox) (except docker build auto-syncs).
 
 Docker workflow:
+- IMPORTANT: Do not run Docker commands directly in the SANDBOX terminal. Always use the docker tool, which runs on the HOST.
 - The docker tool runs on the HOST machine, using the user's workspace as the working directory.
 - When docker build is called, files are automatically synced from the active sandbox to the host first.
 - The build context is always the workspace root. Do not reference external folders or sibling repos.`;
