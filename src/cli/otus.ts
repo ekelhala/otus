@@ -104,11 +104,7 @@ function getToolCallDescription(name: string, input: any): string {
       return `Booting up sandbox VM${sandboxName}`;
     
     case "stop_sandbox":
-      const sandboxId = input?.sandbox_id ? ` ${chalk.dim(input.sandbox_id)}` : "";
-      return `Shutting down sandbox${sandboxId}`;
-    
-    case "list_sandboxes":
-      return "Checking active sandboxes";
+      return "Shutting down sandbox";
     
     case "sync_workspace":
       if (input?.direction === "to_sandbox") {
@@ -117,6 +113,9 @@ function getToolCallDescription(name: string, input: any): string {
         return "Syncing changes back from sandbox";
       }
       return "Syncing workspace files";
+
+    case "get_otusignore":
+      return "Reading .otusignore sync exclusions";
     
     case "start_terminal":
       const termName = input?.name ? ` ${chalk.dim(`(${input.name})`)}` : "";
@@ -520,6 +519,15 @@ program
         });
       };
 
+      // Use readline for confirms to avoid stdin conflicts with prompts library
+      const askConfirm = async (message: string, defaultYes: boolean = true): Promise<boolean> => {
+        const suffix = defaultYes ? " (Y/n) " : " (y/N) ";
+        const answer = await askQuestion(message + suffix);
+        const normalized = answer.trim().toLowerCase();
+        if (normalized === "") return defaultYes;
+        return normalized === "y" || normalized === "yes";
+      };
+
       // Handle graceful shutdown
       let shuttingDown = false;
       let pauseRequested = false;
@@ -609,14 +617,9 @@ program
               await client.sendMessage(sessionId, "pause").next();
               
               console.log(chalk.hex("#FFA500")("\n⏸  Paused")); 
-              const continueResponse = await prompts({
-                type: 'confirm',
-                name: 'continue',
-                message: "Continue execution?",
-                initial: true,
-              });
+              const shouldContinueExecution = await askConfirm("Continue execution?", true);
               
-              if (continueResponse.continue) {
+              if (shouldContinueExecution) {
                 console.log("");
                 // Resume execution
                 messageToSend = "continue";
@@ -629,14 +632,9 @@ program
             
             // If max iterations reached, prompt user to continue
             if (maxIterationsReached) {
-              const continueResponse = await prompts({
-                type: 'confirm',
-                name: 'continue',
-                message: chalk.hex("#FFA500")("Continue iterating?"),
-                initial: true,
-              });
+              const shouldContinueIterating = await askConfirm(chalk.hex("#FFA500")("Continue iterating?"), true);
               
-              if (continueResponse.continue) {
+              if (shouldContinueIterating) {
                 console.log("");
                 // Continue with another iteration
                 messageToSend = "continue";
