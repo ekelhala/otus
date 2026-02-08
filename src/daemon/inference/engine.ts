@@ -19,6 +19,7 @@ import { Conversation, parseAssistantResponse } from "./conversation.ts";
 import { PlanState } from "./plan-state.ts";
 import { callModel } from "./model-caller.ts";
 import { executeToolCalls } from "./tool-execution.ts";
+import { runPlanningPass } from "./planner.ts";
 
 /**
  * Inference Engine implementing the ReAct loop
@@ -32,6 +33,11 @@ export class InferenceEngine {
   private readonly contextBuilder: ContextBuilder;
   private readonly conversation: Conversation;
   private readonly plan: PlanState;
+
+  /** Current top-level user task (used to seed each subtask) */
+  private taskGoal: string = "";
+  /** Compact handoff from previous step to next step */
+  private previousStepResult: string = "";
 
   /** Current session ID */
   private sessionId: string = "";
@@ -74,7 +80,7 @@ export class InferenceEngine {
    * Start a new interactive session
    */
   startSession(): string {
-    this.sessionId = `session-${Date.now()}`;
+    this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.conversation.reset();
     this.plan.reset();
     this.awaitingContinuation = false;
@@ -82,6 +88,8 @@ export class InferenceEngine {
     this.currentIteration = 0;
     this.consecutiveNoToolCalls = 0;
     this.contextBuilder.clearSummary();
+    this.taskGoal = "";
+    this.previousStepResult = "";
 
     // Create session in episodic memory
     this.episodicMemory.createTask(this.sessionId, "Interactive session");
@@ -142,13 +150,39 @@ export class InferenceEngine {
       this.currentIteration = 0;
       // Don't add the "continue" message to history, just resume
     } else {
-      // Add user message to conversation
-      this.conversation.addUserMessage(userMessage);
+      // New top-level request: planning pass + step-by-step execution.
+      this.taskGoal = userMessage;
+      this.previousStepResult = "";
+      this.plan.reset();
+      this.conversation.reset();
+
       // Reset flags and iteration count for new requests
       this.awaitingContinuation = false;
       this.paused = false;
       this.currentIteration = 0;
       this.consecutiveNoToolCalls = 0;
+
+      // Planning pass (separate system prompt)
+      const steps = await runPlanningPass({
+        client: this.client,
+        model: this.model,
+        goal: this.taskGoal,
+        tools,
+        timeoutMs: EXECUTION.API_TIMEOUT_MS,
+        logger: this.logger,
+      });
+
+      const planSummary = this.plan.activate(steps);
+      this.updateSessionSummary(planSummary);
+
+      yield {
+        type: "plan_created",
+        steps,
+        currentStep: 1,
+      };
+
+      // Initialize step conversation for step 1
+      this.initializeCurrentStepConversation();
     }
 
     let iteration = 0;
@@ -164,8 +198,32 @@ export class InferenceEngine {
         const result = yield* this.processIteration(iteration);
 
         if (result.complete) {
-          turnComplete = true;
+          // Subtask finished.
           completionSummary = result.summary;
+          this.previousStepResult = completionSummary || "";
+
+          if (this.plan.hasMoreSteps()) {
+            // Advance to next plan step and start a fresh, decoupled subtask execution.
+            const progress = this.plan.advance();
+            this.updateSessionSummary(progress.summary);
+            yield {
+              type: "plan_step_complete",
+              completedStep: progress.completedStep,
+              nextStep: progress.nextStep,
+              totalSteps: progress.totalSteps,
+            };
+
+            // Reset per-step counters and initialize a new per-step conversation
+            this.conversation.reset();
+            this.consecutiveNoToolCalls = 0;
+            iteration = 0;
+            this.currentIteration = 0;
+            this.initializeCurrentStepConversation();
+            continue;
+          }
+
+          // Final step completed
+          turnComplete = true;
         }
       }
 
@@ -194,6 +252,28 @@ export class InferenceEngine {
   }
 
   /**
+   * Initializes a fresh per-step conversation.
+   * Each step only sees: the top-level task, current subtask, and a compact handoff summary.
+   */
+  private initializeCurrentStepConversation(): void {
+    const currentStepDirective = this.plan.getCurrentStepDirective();
+    const parts: string[] = [];
+    parts.push(`Task: ${this.taskGoal}`);
+    if (currentStepDirective) {
+      // Keep directive text stable and short.
+      parts.push(`Subtask: ${currentStepDirective}`);
+    }
+    if (this.previousStepResult.trim().length > 0) {
+      parts.push(`Previous step result:\n${this.previousStepResult}`);
+    }
+    parts.push(
+      "Work only on this subtask. Use tools to make progress. When the subtask is done, call task_complete with a concise summary of what was achieved in this subtask."
+    );
+
+    this.conversation.addUserMessage(parts.join("\n\n"));
+  }
+
+  /**
    * Process a single iteration of the agent loop
    */
   private async *processIteration(
@@ -204,7 +284,9 @@ export class InferenceEngine {
     // Log thinking phase
     this.episodicMemory.logEvent(this.sessionId, "think", {
       iteration,
-      context: "Processing user request",
+      context: this.plan.isActive()
+        ? `Executing plan step ${this.plan.getCurrentStepNumber()}/${this.plan.getTotalSteps()}`
+        : "Processing user request",
     });
 
     // Call model and get response
@@ -313,12 +395,17 @@ export class InferenceEngine {
    * Call model API with current messages
    */
   private async callModel(): Promise<OpenAI.ChatCompletion> {
+    // During subtask execution we don't want nested replanning.
+    const executionTools = tools.filter(
+      (t) => !(t.type === "function" && t.function.name === "plan")
+    );
+
     return await callModel({
       client: this.client,
       model: this.model,
       maxTokens: LLM.MAX_TOKENS,
       messages: this.conversation.getAll(),
-      tools: tools,
+      tools: executionTools,
       toolChoice: "auto",
       systemPrompt: SYSTEM_PROMPT,
       currentStepDirective: this.plan.getCurrentStepDirective(),
@@ -342,20 +429,13 @@ export class InferenceEngine {
       toolHandlers: this.toolHandlers,
       episodicMemory: this.episodicMemory,
       logger: this.logger,
-      plan: this.plan,
-      onSessionSummaryUpdate: (update: string) => this.updateSessionSummary(update),
+      // Step execution should be decoupled; task_complete ends the current subtask.
+      plan: undefined,
+      handlePlanTool: false,
     });
 
     for (const toolResult of result.toolResults) {
       this.conversation.push(toolResult);
-    }
-
-    if (result.pendingPlanSteps) {
-      const planSummary = this.plan.activate(result.pendingPlanSteps);
-      this.updateSessionSummary(planSummary);
-      this.logger.debug(
-        `Plan activated with ${this.plan.getTotalSteps()} steps. Starting step ${this.plan.getCurrentStepNumber()}.`
-      );
     }
 
     return result.iterationResult;

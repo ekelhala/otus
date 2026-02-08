@@ -13,8 +13,12 @@ export interface ExecuteToolCallsArgs {
   toolHandlers: ToolHandlers;
   episodicMemory: EpisodicMemory;
   logger: Logger;
-  plan: PlanState;
-  onSessionSummaryUpdate: (update: string) => void;
+  /** Optional plan state. If provided, task_complete may advance steps instead of completing. */
+  plan?: PlanState;
+  /** Whether to treat the `plan` tool specially and surface pending plan steps. */
+  handlePlanTool?: boolean;
+  /** Called when plan progress/activation should be appended to session summary. */
+  onSessionSummaryUpdate?: (update: string) => void;
 }
 
 export interface ExecuteToolCallsResult {
@@ -34,6 +38,7 @@ export async function* executeToolCalls(
     episodicMemory,
     logger,
     plan,
+    handlePlanTool,
     onSessionSummaryUpdate,
   } = args;
 
@@ -56,7 +61,7 @@ export async function* executeToolCalls(
     logger.debug(`executeSingleToolCall returned for ${toolCall.function.name}`);
     toolResults.push(result.toolResult);
 
-    if (toolCall.function.name === "plan") {
+    if (handlePlanTool && toolCall.function.name === "plan") {
       try {
         const planInput = JSON.parse(toolCall.function.arguments);
         pendingPlanSteps = planInput.steps;
@@ -71,13 +76,11 @@ export async function* executeToolCalls(
     }
 
     if (result.isTaskComplete) {
-      if (plan.hasMoreSteps()) {
+      if (plan && plan.hasMoreSteps()) {
         const progress = plan.advance();
-        onSessionSummaryUpdate(progress.summary);
+        onSessionSummaryUpdate?.(progress.summary);
         turnComplete = false;
-        logger.debug(
-          `Step ${progress.completedStep} completed, moving to step ${progress.nextStep}`
-        );
+        logger.debug(`Step ${progress.completedStep} completed, moving to step ${progress.nextStep}`);
         yield {
           type: "plan_step_complete",
           completedStep: progress.completedStep,

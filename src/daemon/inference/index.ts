@@ -17,7 +17,7 @@ export { InferenceEngine } from "./engine.ts";
 export { tools, type ToolName } from "./tools.ts";
 
 // Re-export prompts for customization
-export { buildInitialPrompt, ACTION_PROMPT } from "./prompts.ts";
+export { buildInitialPrompt, ACTION_PROMPT, PLANNING_SYSTEM_PROMPT } from "./prompts.ts";
 
 // Re-export tool handlers for extension
 export { ToolHandlers, type ToolHandlersConfig } from "./tool-handlers.ts";
